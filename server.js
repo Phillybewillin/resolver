@@ -10,8 +10,9 @@ const TMDB_API_KEY = process.env.TMDB_API_KEY;
 
 // ─── Addon Config ────────────────────────────────────────────────────────────
 const ADDONS = {
-  nuvio: { base: 'https://nuviostreams.hayd.uk', name: 'NuvioStreams' },
   webstreamr: { base: 'https://webstreamr.hayd.uk', name: 'WebStreamr' },
+  streamvix : { base: 'https://streamvix.hayd.uk' , name: 'StreamVix'},
+  nuvio: { base: 'https://nuviostreams.hayd.uk', name: 'NuvioStreams' }
 };
 
 const WYZIE_BASE = 'https://sub.wyzie.ru';
