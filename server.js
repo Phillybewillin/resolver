@@ -177,19 +177,34 @@ async function fetchSubtitles(wyzieId, type, season, episode) {
     return [];
   }
 
-  let url = `${WYZIE_BASE}/search?id=${encodeURIComponent(wyzieId)}&key=${WYZIE_API_KEY}`;
-  if (type === 'tv') url += `&season=${season}&episode=${episode}`;
+  const params = new URLSearchParams({ id: wyzieId });
+  if (type === 'tv') { params.set('season', season); params.set('episode', episode); }
+  params.set('key', WYZIE_API_KEY);
 
   const controller = new AbortController();
-  const timeout    = setTimeout(() => controller.abort(), 8000);
+  const timeout    = setTimeout(() => controller.abort(), 10000);
 
   try {
-    const res = await fetch(url, { signal: controller.signal });
+    const res = await fetch(`${WYZIE_BASE}/search?${params}`, { signal: controller.signal });
     clearTimeout(timeout);
     if (!res.ok) throw new Error(`Wyzie HTTP ${res.status}`);
 
     const raw  = await res.json();
+    console.debug(`[Wyzie] raw type: ${Array.isArray(raw) ? 'array' : typeof raw}, keys: ${Object.keys(raw || {}).join(', ')}`);
+
     const list = Array.isArray(raw) ? raw : (Array.isArray(raw?.results) ? raw.results : []);
+    console.debug(`[Wyzie] list.length = ${list.length}`);
+
+    if (list.length > 0) {
+      const formats = [...new Set(list.map(s => (s.format || 'unknown').toLowerCase()))];
+      console.debug(`[Wyzie] formats present: ${formats.join(', ')}`);
+      console.debug(`[Wyzie] first entry sample: ${JSON.stringify(list[0]).slice(0, 300)}`);
+    }
+
+    if (list.length === 0) {
+      console.warn(`[Wyzie] returned empty list for id=${wyzieId}`);
+      return [];
+    }
 
     // Drop formats that don't work on web — keep only srt and vtt.
     // SRT gets converted client-side; VTT works natively with <track>.
@@ -197,9 +212,10 @@ async function fetchSubtitles(wyzieId, type, season, episode) {
     const compatible = list.filter((sub) =>
       WEB_FORMATS.has((sub.format || '').toLowerCase())
     );
+    console.debug(`[Wyzie] compatible (srt/vtt): ${compatible.length} / ${list.length}`);
 
     if (compatible.length === 0) {
-      console.warn(`Wyzie returned no web-compatible subtitles (srt/vtt) for id=${wyzieId}`);
+      console.warn(`[Wyzie] no web-compatible subtitles (srt/vtt) for id=${wyzieId}`);
       return [];
     }
 
@@ -280,6 +296,16 @@ function sortSources(sources) {
 }
 
 // ─── Routes ──────────────────────────────────────────────────────────────────
+
+// Subtitle proxy route — injects the API key server-side, safe to call from
+// the frontend directly without exposing WYZIE_API_KEY to the client.
+app.get('/subs', async (req, res) => {
+  const params = new URLSearchParams(req.query);
+  params.set('key', WYZIE_API_KEY);
+  const data = await fetch(`${WYZIE_BASE}/search?${params}`).then(r => r.json());
+  res.json(data);
+});
+
 app.get('/health', (_req, res) => {
   res.json({
     ok               : true,
