@@ -5,16 +5,48 @@ const cors = require('cors');
 const app = express();
 app.use(cors());
 
-const PORT = process.env.PORT || 3001;
-const TMDB_API_KEY = process.env.TMDB_API_KEY;
+const PORT                = process.env.PORT                  || 3001;
+const TMDB_API_KEY        = process.env.TMDB_API_KEY;
+const MEDIAFLOW_PROXY_URL = (process.env.MEDIAFLOW_PROXY_URL || 'https://phillybewillin-unhided.hf.space').replace(/\/$/, '');
+const MEDIAFLOW_PASSWORD  = process.env.MEDIAFLOW_API_PASSWORD;
 
 // ─── Addon Config ────────────────────────────────────────────────────────────
+// isProxy: true  →  every stream URL from this addon gets routed through
+//                   MediaFlow before being returned to the client.
+// fallbackBase   →  tried automatically if the primary base times out or 404s.
 const ADDONS = {
-  nuvio: { base: 'https://nuviostreams.hayd.uk', name: 'NuvioStreams' },
-  webstreamr: { base: 'https://webstreamr.hayd.uk', name: 'WebStreamr' },
+  nuvio      : { base: 'https://nuviostreams.hayd.uk' , name: 'NuvioStreams' },
+  webstreamr : { base: 'https://webstreamr.hayd.uk'  , name: 'WebStreamr'  },
+  streamvix  : { base: 'https://streamvix.hayd.uk'   , name: 'StreamVix'   },
+
+  // ── Proxy-required addons ────────────────────────────────────────────────
+  cloudnestra: {
+    base        : 'https://cloudnestra.com',
+    fallbackBase: 'https://www.cloudnestra.com',
+    name        : 'Cloudnestra',
+    isProxy     : true,
+  },
+  vidsrc_xyz : { base: 'https://vidsrc.xyz' , name: 'VidSrc.xyz', isProxy: true },
+  vidsrc_to  : { base: 'https://vidsrc.to'  , name: 'VidSrc.to' , isProxy: true },
+  vidsrc_me  : { base: 'https://vidsrc.me'  , name: 'VidSrc.me' , isProxy: true },
+  vidsrc_pro : { base: 'https://vidsrc.pro' , name: 'VidSrc.pro', isProxy: true },
 };
 
 const WYZIE_BASE = 'https://sub.wyzie.ru';
+
+// ─── MediaFlow Proxy Wrapper ─────────────────────────────────────────────────
+// Routes a stream URL through your self-hosted MediaFlow instance.
+//   .m3u8  →  /proxy/hls    (re-proxies every segment inside the manifest)
+//   other  →  /proxy/stream (single-file HTTP proxy)
+// The api_password param is appended only when the env var is set.
+function wrapWithProxy(streamUrl) {
+  if (!streamUrl || !MEDIAFLOW_PROXY_URL) return streamUrl;
+  const endpoint = streamUrl.includes('.m3u8') ? 'proxy/hls' : 'proxy/stream';
+  const out = new URL(`${MEDIAFLOW_PROXY_URL}/${endpoint}`);
+  out.searchParams.set('d', streamUrl);
+  if (MEDIAFLOW_PASSWORD) out.searchParams.set('api_password', MEDIAFLOW_PASSWORD);
+  return out.toString();
+}
 
 // ─── TMDB → IMDB Resolution Cache ───────────────────────────────────────────
 const idCache = new Map();
@@ -24,9 +56,10 @@ async function resolveId(tmdbId, type) {
   if (idCache.has(cacheKey)) return idCache.get(cacheKey);
 
   if (!TMDB_API_KEY) {
-    const fallback = `tmdb:${tmdbId}`;
-    idCache.set(cacheKey, { addonId: fallback, wyzieId: tmdbId });
-    return { addonId: fallback, wyzieId: tmdbId };
+    console.warn('⚠  No TMDB_API_KEY — subtitles will likely be empty (Wyzie needs an IMDB ID)');
+    const fallback = { addonId: `tmdb:${tmdbId}`, wyzieId: tmdbId };
+    idCache.set(cacheKey, fallback);
+    return fallback;
   }
 
   const tmdbType = type === 'tv' ? 'tv' : 'movie';
@@ -42,18 +75,20 @@ async function resolveId(tmdbId, type) {
       idCache.set(cacheKey, result);
       return result;
     }
+
+    console.warn(`⚠  TMDB returned no imdb_id for ${tmdbType}/${tmdbId}`);
   } catch (err) {
     console.error('TMDB resolution failed:', err.message);
   }
 
-  // Fallback: use tmdb:xxx for addons and raw number for Wyzie
   const fallback = { addonId: `tmdb:${tmdbId}`, wyzieId: tmdbId };
   idCache.set(cacheKey, fallback);
   return fallback;
 }
 
 // ─── Quality Parsing ─────────────────────────────────────────────────────────
-const QUALITY_ORDER = { '4k': 0, '1080p': 1, '720p': 2, '480p': 3, auto: 4 };
+// 4K is intentionally de-prioritised (user preference).
+const QUALITY_ORDER = { '1080p': 0, '720p': 1, '480p': 2, 'auto': 3, '4k': 4 };
 
 function parseQuality(text) {
   if (!text) return 'auto';
@@ -68,82 +103,112 @@ function parseQuality(text) {
 function inferStreamType(url) {
   if (!url) return 'other';
   if (url.includes('.m3u8')) return 'hls';
-  if (url.includes('.mp4')) return 'mp4';
+  if (url.includes('.mp4'))  return 'mp4';
   return 'other';
 }
 
 // ─── Fetch Streams from a Single Addon ───────────────────────────────────────
+// Handles the fallbackBase retry transparently so callers don't need to know.
 async function fetchAddonStreams(addonKey, addonId, type, season, episode) {
-  const addon = ADDONS[addonKey];
-  const idPart =
-    type === 'tv' ? `${addonId}:${season}:${episode}` : addonId;
+  const addon       = ADDONS[addonKey];
+  const idPart      = type === 'tv' ? `${addonId}:${season}:${episode}` : addonId;
   const contentType = type === 'tv' ? 'series' : 'movie';
-  const url = `${addon.base}/stream/${contentType}/${idPart}.json`;
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8000);
+  async function tryBase(base) {
+    const url        = `${base}/stream/${contentType}/${idPart}.json`;
+    const controller = new AbortController();
+    const timeout    = setTimeout(() => controller.abort(), 8000);
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (!data.streams || !Array.isArray(data.streams)) return [];
+      return data.streams;
+    } catch (err) {
+      clearTimeout(timeout);
+      throw err;
+    }
+  }
+
+  let rawStreams;
 
   try {
-    const res = await fetch(url, { signal: controller.signal });
-    clearTimeout(timeout);
-    if (!res.ok) throw new Error(`${addon.name} HTTP ${res.status}`);
-    const data = await res.json();
-
-    if (!data.streams || !Array.isArray(data.streams)) return [];
-
-    return data.streams.map((s) => {
-      const qualityText = `${s.name || ''} ${s.title || ''}`;
-      return {
-        url: s.url,
-        type: inferStreamType(s.url),
-        label: `${addon.name} • ${s.title || s.name || 'Unknown'}`,
-        quality: parseQuality(qualityText),
-        addon: addonKey,
-      };
-    });
-  } catch (err) {
-    clearTimeout(timeout);
-    console.error(`${addon.name} fetch failed:`, err.message);
-    return null; // signal failure
+    rawStreams = await tryBase(addon.base);
+  } catch (primaryErr) {
+    if (addon.fallbackBase) {
+      console.warn(`${addon.name} primary failed (${primaryErr.message}), trying fallback…`);
+      try {
+        rawStreams = await tryBase(addon.fallbackBase);
+      } catch (fallbackErr) {
+        console.error(`${addon.name} fallback also failed:`, fallbackErr.message);
+        return null;
+      }
+    } else {
+      console.error(`${addon.name} fetch failed:`, primaryErr.message);
+      return null;
+    }
   }
+
+  return rawStreams.map((s) => {
+    const qualityText = `${s.name || ''} ${s.title || ''}`;
+    const rawUrl      = s.url;
+    const streamUrl   = addon.isProxy ? wrapWithProxy(rawUrl) : rawUrl;
+
+    return {
+      url    : streamUrl,
+      type   : inferStreamType(rawUrl),   // infer from original, not proxied URL
+      label  : `${addon.name} • ${s.title || s.name || 'Unknown'}`,
+      quality: parseQuality(qualityText),
+      addon  : addonKey,
+    };
+  });
 }
 
 // ─── Fetch Subtitles from Wyzie ──────────────────────────────────────────────
 async function fetchSubtitles(wyzieId, type, season, episode) {
-  let url = `${WYZIE_BASE}/search?id=${wyzieId}&format=srt&encoding=utf-8`;
+  if (!String(wyzieId).startsWith('tt')) {
+    console.warn(`⚠  Wyzie lookup using raw ID "${wyzieId}" — expect empty results without an IMDB ID`);
+  }
+
+  let url = `${WYZIE_BASE}/search?id=${encodeURIComponent(wyzieId)}`;
   if (type === 'tv') url += `&season=${season}&episode=${episode}`;
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8000);
+  const timeout    = setTimeout(() => controller.abort(), 8000);
 
   try {
     const res = await fetch(url, { signal: controller.signal });
     clearTimeout(timeout);
     if (!res.ok) throw new Error(`Wyzie HTTP ${res.status}`);
-    const data = await res.json();
 
-    if (!Array.isArray(data)) return [];
+    const raw  = await res.json();
+    const list = Array.isArray(raw) ? raw : (Array.isArray(raw?.results) ? raw.results : []);
 
-    // Deduplicate by lang code – keep first occurrence
-    const seen = new Set();
+    if (list.length === 0) {
+      console.warn(`Wyzie returned 0 subtitles for id=${wyzieId}`);
+      return [];
+    }
+
+    const seen   = new Set();
     const unique = [];
-    for (const sub of data) {
-      const lang = (sub.lang || '').toLowerCase();
-      if (seen.has(lang)) continue;
+
+    for (const sub of list) {
+      const lang = (sub.lang || sub.language || '').toLowerCase();
+      if (!lang || seen.has(lang)) continue;
       seen.add(lang);
       unique.push({
-        url: sub.url,
-        lang: sub.lang || '',
-        display: sub.display || sub.lang || '',
-        format: sub.format || 'srt',
-        isHI: !!sub.isHI,
+        url    : sub.url,
+        lang   : sub.lang || sub.language || '',
+        display: sub.display || sub.languageName || sub.lang || sub.language || '',
+        format : sub.format || 'srt',
+        isHI   : !!sub.isHI,
       });
     }
 
-    // Sort: English first, then alphabetical by display
     unique.sort((a, b) => {
-      const aEn = a.lang.toLowerCase() === 'en' ? 0 : 1;
-      const bEn = b.lang.toLowerCase() === 'en' ? 0 : 1;
+      const aEn = a.lang.toLowerCase().startsWith('en') ? 0 : 1;
+      const bEn = b.lang.toLowerCase().startsWith('en') ? 0 : 1;
       if (aEn !== bEn) return aEn - bEn;
       return (a.display || '').localeCompare(b.display || '');
     });
@@ -152,120 +217,142 @@ async function fetchSubtitles(wyzieId, type, season, episode) {
   } catch (err) {
     clearTimeout(timeout);
     console.error('Wyzie fetch failed:', err.message);
-    return []; // silent failure
+    return [];
   }
 }
 
 // ─── Big File Detection ──────────────────────────────────────────────────────
+// Catches "13.46GB" (Nuvio) and "💾 13.46 GB" (WebStreamr) label formats.
 function isBigFile(label) {
-  // Match sizes like "26.33 GB" — anything ≥ 5 GB is considered a big raw file
   const match = label.match(/(\d+(?:\.\d+)?)\s*GB/i);
   if (!match) return false;
   return parseFloat(match[1]) >= 5;
 }
 
+// ─── Addon Sort Weight ───────────────────────────────────────────────────────
+const ADDON_ORDER = {
+  nuvio       :  0,
+  webstreamr  :  1,
+  streamvix   :  2,
+  cloudnestra : 10,
+  vidsrc_xyz  : 11,
+  vidsrc_to   : 12,
+  vidsrc_me   : 13,
+  vidsrc_pro  : 14,
+};
+
 // ─── Sort Merged Sources ─────────────────────────────────────────────────────
+// Order: 1080p → 720p → 480p → auto → 4k  (direct-play)
+//        cloudnestra → vidsrc variants     (proxy, same quality buckets)
+//        big files ≥ 5 GB                  (absolute bottom)
 function sortSources(sources) {
-  const addonOrder = { nuvio: 0, webstreamr: 1 };
   return sources.sort((a, b) => {
-    // Big raw files always go to the bottom
     const aBig = isBigFile(a.label) ? 1 : 0;
     const bBig = isBigFile(b.label) ? 1 : 0;
     if (aBig !== bBig) return aBig - bBig;
 
-    const qa = QUALITY_ORDER[a.quality] ?? 4;
-    const qb = QUALITY_ORDER[b.quality] ?? 4;
+    const aProxy = ADDONS[a.addon]?.isProxy ? 1 : 0;
+    const bProxy = ADDONS[b.addon]?.isProxy ? 1 : 0;
+    if (aProxy !== bProxy) return aProxy - bProxy;
+
+    const qa = QUALITY_ORDER[a.quality] ?? 3;
+    const qb = QUALITY_ORDER[b.quality] ?? 3;
     if (qa !== qb) return qa - qb;
-    return (addonOrder[a.addon] ?? 2) - (addonOrder[b.addon] ?? 2);
+
+    return (ADDON_ORDER[a.addon] ?? 5) - (ADDON_ORDER[b.addon] ?? 5);
   });
 }
 
 // ─── Routes ──────────────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
-  res.json({ ok: true, timestamp: Date.now() });
+  res.json({
+    ok               : true,
+    timestamp        : Date.now(),
+    mediaflowProxy   : MEDIAFLOW_PROXY_URL,
+    mediaflowPassword: MEDIAFLOW_PASSWORD ? '✓ set' : '✗ not set',
+  });
 });
 
 app.get('/api/streams', async (req, res) => {
   const { tmdbId, type, season, episode } = req.query;
 
-  // Validate input
   if (!tmdbId || !type) {
     return res.json({
-      resolvedId: null,
-      sources: [],
-      subtitles: [],
+      resolvedId: null, sources: [], subtitles: [],
       error: 'Missing required query params: tmdbId, type',
     });
   }
 
   if (type === 'tv' && (!season || !episode)) {
     return res.json({
-      resolvedId: null,
-      sources: [],
-      subtitles: [],
+      resolvedId: null, sources: [], subtitles: [],
       error: 'Missing required query params for TV: season, episode',
     });
   }
 
   try {
-    // Phase 1: resolve TMDB → IMDB (cached after first call)
     const { addonId, wyzieId } = await resolveId(tmdbId, type);
 
-    // Phase 2: fetch streams + subtitles in parallel
-    const [nuvioResult, webstreamrResult, subtitlesResult] =
-      await Promise.allSettled([
-        fetchAddonStreams('nuvio', addonId, type, season, episode),
-        fetchAddonStreams('webstreamr', addonId, type, season, episode),
-        fetchSubtitles(wyzieId, type, season, episode),
-      ]);
+    const [
+      nuvioR, webstreamrR, streamvixR,
+      cloudnestraR,
+      vidsrcXyzR, vidsrcToR, vidsrcMeR, vidsrcProR,
+      subtitlesR,
+    ] = await Promise.allSettled([
+      fetchAddonStreams('nuvio',       addonId, type, season, episode),
+      fetchAddonStreams('webstreamr',  addonId, type, season, episode),
+      fetchAddonStreams('streamvix',   addonId, type, season, episode),
+      fetchAddonStreams('cloudnestra', addonId, type, season, episode),
+      fetchAddonStreams('vidsrc_xyz',  addonId, type, season, episode),
+      fetchAddonStreams('vidsrc_to',   addonId, type, season, episode),
+      fetchAddonStreams('vidsrc_me',   addonId, type, season, episode),
+      fetchAddonStreams('vidsrc_pro',  addonId, type, season, episode),
+      fetchSubtitles(wyzieId, type, season, episode),
+    ]);
 
-    // Collect sources
-    const nuvioStreams =
-      nuvioResult.status === 'fulfilled' && nuvioResult.value
-        ? nuvioResult.value
-        : [];
-    const webstreamrStreams =
-      webstreamrResult.status === 'fulfilled' && webstreamrResult.value
-        ? webstreamrResult.value
-        : [];
+    const streams = (r) =>
+      r.status === 'fulfilled' && Array.isArray(r.value) ? r.value : [];
 
-    const allSources = sortSources([...nuvioStreams, ...webstreamrStreams]);
+    const allSources = sortSources([
+      ...streams(nuvioR),
+      ...streams(webstreamrR),
+      ...streams(streamvixR),
+      ...streams(cloudnestraR),
+      ...streams(vidsrcXyzR),
+      ...streams(vidsrcToR),
+      ...streams(vidsrcMeR),
+      ...streams(vidsrcProR),
+    ]);
 
-    // Collect subtitles
-    const subtitles =
-      subtitlesResult.status === 'fulfilled' ? subtitlesResult.value : [];
+    const subtitles = subtitlesR.status === 'fulfilled' ? subtitlesR.value : [];
 
-    // Build error string
-    const errors = [];
-    if (
-      nuvioResult.status === 'rejected' ||
-      (nuvioResult.status === 'fulfilled' && nuvioResult.value === null)
-    ) {
-      errors.push('NuvioStreams failed');
-    }
-    if (
-      webstreamrResult.status === 'rejected' ||
-      (webstreamrResult.status === 'fulfilled' &&
-        webstreamrResult.value === null)
-    ) {
-      errors.push('WebStreamr failed');
-    }
-    if (allSources.length === 0 && errors.length > 0) {
-      errors.push('No streams available');
-    }
+    const addonResults = {
+      NuvioStreams : nuvioR,
+      WebStreamr   : webstreamrR,
+      StreamVix    : streamvixR,
+      Cloudnestra  : cloudnestraR,
+      'VidSrc.xyz' : vidsrcXyzR,
+      'VidSrc.to'  : vidsrcToR,
+      'VidSrc.me'  : vidsrcMeR,
+      'VidSrc.pro' : vidsrcProR,
+    };
+
+    const errors = Object.entries(addonResults)
+      .filter(([, r]) => r.status === 'rejected' || r.value === null)
+      .map(([name]) => `${name} failed`);
+
+    if (allSources.length === 0 && errors.length > 0) errors.push('No streams available');
 
     res.json({
       resolvedId: addonId,
-      sources: allSources,
+      sources   : allSources,
       subtitles,
-      error: errors.length > 0 ? errors.join('; ') : null,
+      error     : errors.length > 0 ? errors.join('; ') : null,
     });
   } catch (err) {
     console.error('Unhandled error in /api/streams:', err);
     res.json({
-      resolvedId: null,
-      sources: [],
-      subtitles: [],
+      resolvedId: null, sources: [], subtitles: [],
       error: err.message || 'Internal server error',
     });
   }
@@ -274,7 +361,9 @@ app.get('/api/streams', async (req, res) => {
 // ─── Start ───────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`Resolver listening on http://localhost:${PORT}`);
+  console.log(`MediaFlow proxy : ${MEDIAFLOW_PROXY_URL}`);
+  console.log(`MediaFlow pass  : ${MEDIAFLOW_PASSWORD ? '✓ set' : '⚠  not set — proxy endpoints will reject requests'}`);
   if (!TMDB_API_KEY) {
-    console.warn('⚠  TMDB_API_KEY is not set — ID resolution will use fallback');
+    console.warn('⚠  TMDB_API_KEY not set — ID resolution will use fallback (subtitles will likely be empty)');
   }
 });
