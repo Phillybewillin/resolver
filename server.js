@@ -15,6 +15,7 @@ const MEDIAFLOW_PASSWORD  = process.env.MEDIAFLOW_API_PASSWORD;
 //                   MediaFlow before being returned to the client.
 // fallbackBase   →  tried automatically if the primary base times out or 404s.
 const ADDONS = {
+<<<<<<< HEAD
   nuvio      : { base: 'https://nuviostreams.hayd.uk' , name: 'NuvioStreams' },
   webstreamr : { base: 'https://webstreamr.hayd.uk'  , name: 'WebStreamr'  },
   streamvix  : { base: 'https://streamvix.hayd.uk'   , name: 'StreamVix'   },
@@ -30,6 +31,11 @@ const ADDONS = {
   vidsrc_to  : { base: 'https://vidsrc.to'  , name: 'VidSrc.to' , isProxy: true },
   vidsrc_me  : { base: 'https://vidsrc.me'  , name: 'VidSrc.me' , isProxy: true },
   vidsrc_pro : { base: 'https://vidsrc.pro' , name: 'VidSrc.pro', isProxy: true },
+=======
+  webstreamr: { base: 'https://webstreamr.hayd.uk', name: 'WebStreamr' },
+  streamvix : { base: 'https://streamvix.hayd.uk' , name: 'StreamVix'},
+  nuvio: { base: 'https://nuviostreams.hayd.uk', name: 'NuvioStreams' }
+>>>>>>> 43a1e06080c705a494f242e89c2bd24cbbd2b424
 };
 
 const WYZIE_BASE = 'https://sub.wyzie.ru';
