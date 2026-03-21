@@ -9,6 +9,7 @@ const PORT                = process.env.PORT                  || 3001;
 const TMDB_API_KEY        = process.env.TMDB_API_KEY;
 const MEDIAFLOW_PROXY_URL = (process.env.MEDIAFLOW_PROXY_URL || 'https://phillybewillin-unhided.hf.space').replace(/\/$/, '');
 const MEDIAFLOW_PASSWORD  = process.env.MEDIAFLOW_API_PASSWORD;
+const WYZIE_API_KEY       = process.env.WYZIE_API_KEY;
 
 // ─── Addon Config ────────────────────────────────────────────────────────────
 // isProxy: true  →  every stream URL from this addon gets routed through
@@ -32,7 +33,7 @@ const ADDONS = {
   vidsrc_pro : { base: 'https://vidsrc.pro' , name: 'VidSrc.pro', isProxy: true },
 };
 
-const WYZIE_BASE = 'https://sub.wyzie.ru';
+const WYZIE_BASE = 'https://sub.wyzie.io';
 
 // ─── MediaFlow Proxy Wrapper ─────────────────────────────────────────────────
 // Routes a stream URL through your self-hosted MediaFlow instance.
@@ -171,7 +172,12 @@ async function fetchSubtitles(wyzieId, type, season, episode) {
     console.warn(`⚠  Wyzie lookup using raw ID "${wyzieId}" — expect empty results without an IMDB ID`);
   }
 
-  let url = `${WYZIE_BASE}/search?id=${encodeURIComponent(wyzieId)}`;
+  if (!WYZIE_API_KEY) {
+    console.warn('⚠  WYZIE_API_KEY not set — get a free key at https://sub.wyzie.io/redeem');
+    return [];
+  }
+
+  let url = `${WYZIE_BASE}/search?id=${encodeURIComponent(wyzieId)}&key=${WYZIE_API_KEY}`;
   if (type === 'tv') url += `&season=${season}&episode=${episode}`;
 
   const controller = new AbortController();
@@ -185,27 +191,37 @@ async function fetchSubtitles(wyzieId, type, season, episode) {
     const raw  = await res.json();
     const list = Array.isArray(raw) ? raw : (Array.isArray(raw?.results) ? raw.results : []);
 
-    if (list.length === 0) {
-      console.warn(`Wyzie returned 0 subtitles for id=${wyzieId}`);
+    // Drop formats that don't work on web — keep only srt and vtt.
+    // SRT gets converted client-side; VTT works natively with <track>.
+    const WEB_FORMATS = new Set(['srt', 'vtt']);
+    const compatible = list.filter((sub) =>
+      WEB_FORMATS.has((sub.format || '').toLowerCase())
+    );
+
+    if (compatible.length === 0) {
+      console.warn(`Wyzie returned no web-compatible subtitles (srt/vtt) for id=${wyzieId}`);
       return [];
     }
 
+    // Deduplicate by language code — keep first (highest ranked) occurrence
     const seen   = new Set();
     const unique = [];
 
-    for (const sub of list) {
-      const lang = (sub.lang || sub.language || '').toLowerCase();
+    for (const sub of compatible) {
+      // New API uses "language" (ISO 639-1), old used "lang" — handle both
+      const lang = (sub.language || sub.lang || '').toLowerCase();
       if (!lang || seen.has(lang)) continue;
       seen.add(lang);
       unique.push({
         url    : sub.url,
-        lang   : sub.lang || sub.language || '',
-        display: sub.display || sub.languageName || sub.lang || sub.language || '',
-        format : sub.format || 'srt',
-        isHI   : !!sub.isHI,
+        lang   : sub.language || sub.lang || '',
+        display: sub.display  || sub.language || sub.lang || '',
+        format : sub.format   || 'srt',
+        isHI   : !!(sub.isHearingImpaired || sub.isHI),
       });
     }
 
+    // English first, then alphabetical by display name
     unique.sort((a, b) => {
       const aEn = a.lang.toLowerCase().startsWith('en') ? 0 : 1;
       const bEn = b.lang.toLowerCase().startsWith('en') ? 0 : 1;
@@ -270,6 +286,7 @@ app.get('/health', (_req, res) => {
     timestamp        : Date.now(),
     mediaflowProxy   : MEDIAFLOW_PROXY_URL,
     mediaflowPassword: MEDIAFLOW_PASSWORD ? '✓ set' : '✗ not set',
+    wyzieKey         : WYZIE_API_KEY       ? '✓ set' : '✗ not set — subtitles will be empty',
   });
 });
 
@@ -363,6 +380,7 @@ app.listen(PORT, () => {
   console.log(`Resolver listening on http://localhost:${PORT}`);
   console.log(`MediaFlow proxy : ${MEDIAFLOW_PROXY_URL}`);
   console.log(`MediaFlow pass  : ${MEDIAFLOW_PASSWORD ? '✓ set' : '⚠  not set — proxy endpoints will reject requests'}`);
+  console.log(`Wyzie key       : ${WYZIE_API_KEY       ? '✓ set' : '⚠  not set — subtitles will always be empty (get free key at https://sub.wyzie.io/redeem)'}`);
   if (!TMDB_API_KEY) {
     console.warn('⚠  TMDB_API_KEY not set — ID resolution will use fallback (subtitles will likely be empty)');
   }
