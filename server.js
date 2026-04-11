@@ -16,8 +16,13 @@ const WYZIE_API_KEY = process.env.WYZIE_API_KEY;
 //                   MediaFlow before being returned to the client.
 // fallbackBase   →  tried automatically if the primary base times out or 404s.
 const ADDONS = {
-  nuvio: { base: 'https://nuviostreams.hayd.uk', name: 'NuvioStreams' },
-  webstreamr: { base: 'https://webstreamr.hayd.uk', name: 'WebStreamr' },
+  webstreamrmbg: {
+    base: 'https://87d6a6ef6b58-webstreamrmbg.baby-beamup.club',
+    fallbackBase: 'https://newman21-webstreamer-mbg.hf.space',
+    name: 'WebStreamrMBG',
+  },
+  nebulastreams: { base: 'https://florence-direct-rocks-info.trycloudflare.com', name: 'NebulaStreams' },
+  notorrent: { base: 'https://addon.notorrent2.workers.dev', name: 'NoTorrent' },
   streamvix: { base: 'https://streamvix.hayd.uk', name: 'StreamVix' },
 
   // ── Proxy-required addons ────────────────────────────────────────────────
@@ -238,7 +243,7 @@ async function fetchSubtitles(wyzieId, type, season, episode) {
 }
 
 // ─── Big File Detection ──────────────────────────────────────────────────────
-// Catches "13.46GB" (Nuvio) and "💾 13.46 GB" (WebStreamr) label formats.
+// Catches "13.46GB" (WebStreamrMBG) and "💾 13.46 GB" label formats.
 function isBigFile(label) {
   const match = label.match(/(\d+(?:\.\d+)?)\s*GB/i);
   if (!match) return false;
@@ -247,9 +252,10 @@ function isBigFile(label) {
 
 // ─── Addon Sort Weight ───────────────────────────────────────────────────────
 const ADDON_ORDER = {
-  nuvio: 0,
-  webstreamr: 1,
-  streamvix: 2,
+  webstreamrmbg: 0,
+  nebulastreams: 1,
+  notorrent: 2,
+  streamvix: 3,
   cloudnestra: 10,
   vidsrc_xyz: 11,
   vidsrc_to: 12,
@@ -311,13 +317,14 @@ app.get('/api/streams', async (req, res) => {
     const { addonId, wyzieId } = await resolveId(tmdbId, type);
 
     const [
-      nuvioR, webstreamrR, streamvixR,
+      webstreamrmbgR, nebulastreamR, notorrentR, streamvixR,
       cloudnestraR,
       vidsrcXyzR, vidsrcToR, vidsrcMeR, vidsrcProR,
       subtitlesR,
     ] = await Promise.allSettled([
-      fetchAddonStreams('nuvio', addonId, type, season, episode),
-      fetchAddonStreams('webstreamr', addonId, type, season, episode),
+      fetchAddonStreams('webstreamrmbg', addonId, type, season, episode),
+      fetchAddonStreams('nebulastreams', addonId, type, season, episode),
+      fetchAddonStreams('notorrent', addonId, type, season, episode),
       fetchAddonStreams('streamvix', addonId, type, season, episode),
       fetchAddonStreams('cloudnestra', addonId, type, season, episode),
       fetchAddonStreams('vidsrc_xyz', addonId, type, season, episode),
@@ -331,8 +338,9 @@ app.get('/api/streams', async (req, res) => {
       r.status === 'fulfilled' && Array.isArray(r.value) ? r.value : [];
 
     const allSources = sortSources([
-      ...streams(nuvioR),
-      ...streams(webstreamrR),
+      ...streams(webstreamrmbgR),
+      ...streams(nebulastreamR),
+      ...streams(notorrentR),
       ...streams(streamvixR),
       ...streams(cloudnestraR),
       ...streams(vidsrcXyzR),
@@ -344,8 +352,9 @@ app.get('/api/streams', async (req, res) => {
     const subtitles = subtitlesR.status === 'fulfilled' ? subtitlesR.value : [];
 
     const addonResults = {
-      NuvioStreams: nuvioR,
-      WebStreamr: webstreamrR,
+      WebStreamrMBG: webstreamrmbgR,
+      NebulaStreams: nebulastreamR,
+      NoTorrent: notorrentR,
       StreamVix: streamvixR,
       Cloudnestra: cloudnestraR,
       'VidSrc.xyz': vidsrcXyzR,
