@@ -24,6 +24,7 @@ const ADDONS = {
   nebulastreams: { base: 'https://florence-direct-rocks-info.trycloudflare.com', name: 'NebulaStreams' },
   notorrent: { base: 'https://addon.notorrent2.workers.dev', name: 'NoTorrent' },
   streamvix: { base: 'https://streamvix.hayd.uk', name: 'StreamVix' },
+  hdhub: { base: 'https://hdhub.thevolecitor.qzz.io', name: 'HdHub', isProxy: true },
 
   // ── Proxy-required addons ────────────────────────────────────────────────
   cloudnestra: {
@@ -208,29 +209,48 @@ async function fetchSubtitles(wyzieId, type, season, episode) {
       return [];
     }
 
-    // Deduplicate by language code — keep first (highest ranked) occurrence
-    const seen = new Set();
+    // For English: keep ALL variants (regular, SDH, HI, CC) — they cover
+    // different portions of the audio so more is better.
+    // For every other language: deduplicate to the first (highest-ranked) hit.
+    const seenNonEn = new Set();
+    const seenEnKeys = new Set(); // de-dupe exact (lang+isHI+display) combos
     const unique = [];
 
     for (const sub of compatible) {
-      // New API uses "language" (ISO 639-1), old used "lang" — handle both
       const lang = (sub.language || sub.lang || '').toLowerCase();
-      if (!lang || seen.has(lang)) continue;
-      seen.add(lang);
+      if (!lang) continue;
+
+      const isHI = !!(sub.isHearingImpaired || sub.isHI);
+      const display = sub.display || sub.language || sub.lang || '';
+
+      if (lang.startsWith('en')) {
+        // Unique key: language + HI flag + display label
+        const key = `${lang}|${isHI}|${display.toLowerCase()}`;
+        if (seenEnKeys.has(key)) continue;
+        seenEnKeys.add(key);
+      } else {
+        if (seenNonEn.has(lang)) continue;
+        seenNonEn.add(lang);
+      }
+
       unique.push({
         url: sub.url,
         lang: sub.language || sub.lang || '',
-        display: sub.display || sub.language || sub.lang || '',
+        display,
         format: sub.format || 'srt',
-        isHI: !!(sub.isHearingImpaired || sub.isHI),
+        isHI,
       });
     }
 
-    // English first, then alphabetical by display name
+    // Sort: English first (regular before SDH/HI), then alphabetical by display
     unique.sort((a, b) => {
       const aEn = a.lang.toLowerCase().startsWith('en') ? 0 : 1;
       const bEn = b.lang.toLowerCase().startsWith('en') ? 0 : 1;
       if (aEn !== bEn) return aEn - bEn;
+      // Within English: non-HI before HI
+      if (aEn === 0 && bEn === 0) {
+        if (a.isHI !== b.isHI) return a.isHI ? 1 : -1;
+      }
       return (a.display || '').localeCompare(b.display || '');
     });
 
@@ -256,6 +276,7 @@ const ADDON_ORDER = {
   nebulastreams: 1,
   notorrent: 2,
   streamvix: 3,
+  hdhub: 4,
   cloudnestra: 10,
   vidsrc_xyz: 11,
   vidsrc_to: 12,
@@ -317,15 +338,17 @@ app.get('/api/streams', async (req, res) => {
     const { addonId, wyzieId } = await resolveId(tmdbId, type);
 
     const [
-      webstreamrmbgR, nebulastreamR, notorrentR, streamvixR,
+      webstreamrmbgR, nebulastreamR, notorrentR, streamvixR, hdhubR,
       cloudnestraR,
       vidsrcXyzR, vidsrcToR, vidsrcMeR, vidsrcProR,
       subtitlesR,
     ] = await Promise.allSettled([
       fetchAddonStreams('webstreamrmbg', addonId, type, season, episode),
-      fetchAddonStreams('nebulastreams', addonId, type, season, episode),
+      // NebulaStreams only accepts tt-prefixed IMDB IDs — use wyzieId
+      fetchAddonStreams('nebulastreams', wyzieId, type, season, episode),
       fetchAddonStreams('notorrent', addonId, type, season, episode),
       fetchAddonStreams('streamvix', addonId, type, season, episode),
+      fetchAddonStreams('hdhub', addonId, type, season, episode),
       fetchAddonStreams('cloudnestra', addonId, type, season, episode),
       fetchAddonStreams('vidsrc_xyz', addonId, type, season, episode),
       fetchAddonStreams('vidsrc_to', addonId, type, season, episode),
@@ -342,6 +365,7 @@ app.get('/api/streams', async (req, res) => {
       ...streams(nebulastreamR),
       ...streams(notorrentR),
       ...streams(streamvixR),
+      ...streams(hdhubR),
       ...streams(cloudnestraR),
       ...streams(vidsrcXyzR),
       ...streams(vidsrcToR),
@@ -356,6 +380,7 @@ app.get('/api/streams', async (req, res) => {
       NebulaStreams: nebulastreamR,
       NoTorrent: notorrentR,
       StreamVix: streamvixR,
+      HdHub: hdhubR,
       Cloudnestra: cloudnestraR,
       'VidSrc.xyz': vidsrcXyzR,
       'VidSrc.to': vidsrcToR,
