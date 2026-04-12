@@ -12,8 +12,9 @@ const MEDIAFLOW_PASSWORD = process.env.MEDIAFLOW_API_PASSWORD;
 const WYZIE_API_KEY = process.env.WYZIE_API_KEY;
 
 // ─── Addon Config ────────────────────────────────────────────────────────────
-// isProxy: true  →  every stream URL from this addon gets routed through
+// isProxy: true  →  HLS (.m3u8) stream URLs from this addon get routed through
 //                   MediaFlow before being returned to the client.
+//                   Non-HLS streams are returned as-is even for proxy addons.
 // fallbackBase   →  tried automatically if the primary base times out or 404s.
 const ADDONS = {
   webstreamrmbg: {
@@ -40,6 +41,28 @@ const ADDONS = {
 };
 
 const WYZIE_BASE = 'https://sub.wyzie.io';
+
+// ─── Hostname Patch ──────────────────────────────────────────────────────────
+// Some addons return stream URLs with a bare hostname that is missing the
+// ".baby-beamup.club" suffix — e.g.:
+//   https://87d6a6ef6b58-webstreamrmbg/extract/?index=0&url=…
+// This function detects those (no dot in hostname) and appends the suffix so
+// the URL becomes valid before any further processing.
+function fixHostname(url) {
+  if (!url) return url;
+  try {
+    const parsed = new URL(url);
+    // A real public hostname always contains at least one dot.
+    // If there is none, assume .baby-beamup.club is missing.
+    if (!parsed.hostname.includes('.')) {
+      parsed.hostname = `${parsed.hostname}.baby-beamup.club`;
+      return parsed.toString();
+    }
+  } catch (_) {
+    // Malformed URL — return as-is and let the caller decide.
+  }
+  return url;
+}
 
 // ─── MediaFlow Proxy Wrapper ─────────────────────────────────────────────────
 // Routes a stream URL through your self-hosted MediaFlow instance.
@@ -157,19 +180,30 @@ async function fetchAddonStreams(addonKey, addonId, type, season, episode) {
     }
   }
 
-  return rawStreams.map((s) => {
-    const qualityText = `${s.name || ''} ${s.title || ''}`;
-    const rawUrl = s.url;
-    const streamUrl = addon.isProxy ? wrapWithProxy(rawUrl) : rawUrl;
+  return rawStreams
+    // ── FIX 1: drop streams that have no URL ────────────────────────────────
+    .filter((s) => s.url)
+    .map((s) => {
+      const qualityText = `${s.name || ''} ${s.title || ''}`;
 
-    return {
-      url: streamUrl,
-      type: inferStreamType(rawUrl),   // infer from original, not proxied URL
-      label: `${addon.name} • ${s.title || s.name || 'Unknown'}`,
-      quality: parseQuality(qualityText),
-      addon: addonKey,
-    };
-  });
+      // ── FIX 3: patch any URL whose hostname is missing .baby-beamup.club ──
+      const rawUrl = fixHostname(s.url);
+
+      // Derive type once and reuse — avoids checking the URL string twice.
+      const streamType = inferStreamType(rawUrl);
+
+      // ── FIX 2: only proxy HLS streams, even for isProxy addons ─────────────
+      //    mp4 / other stream types are returned directly to the client.
+      const streamUrl = (addon.isProxy && streamType === 'hls') ? wrapWithProxy(rawUrl) : rawUrl;
+
+      return {
+        url: streamUrl,
+        type: streamType,
+        label: `${addon.name} • ${s.title || s.name || 'Unknown'}`,
+        quality: parseQuality(qualityText),
+        addon: addonKey,
+      };
+    });
 }
 
 // ─── Fetch Subtitles from Wyzie ──────────────────────────────────────────────
