@@ -417,4 +417,43 @@ app.get('/api/streams', async (req, res) => {
       'VidSrc.pro':   vidsrcProR,
     };
 
-    const errors
+    const errors = Object.entries(addonResults)
+      .filter(([, r]) => r.status === 'rejected' || r.value === null)
+      .map(([name, r]) => {
+        const msg = r.status === 'rejected'
+          ? (r.reason?.message || 'unknown error')
+          : 'returned null';
+        return `${name}: ${msg}`;
+      });
+
+    if (subtitlesR.status === 'rejected') {
+      errors.push(subtitlesR.reason?.message || 'Subtitles: unknown error');
+    }
+
+    if (allSources.length === 0 && errors.length > 0) {
+      errors.push('No streams available');
+    }
+
+    res.json({
+      resolvedId: addonId,
+      sources:    allSources,
+      subtitles,
+      error: errors.length > 0 ? errors.join('; ') : null,
+    });
+  } catch (err) {
+    console.error('Unhandled error in /api/streams:', err);
+    res.json({
+      resolvedId: null, sources: [], subtitles: [],
+      error: err.message || 'Internal server error',
+    });
+  }
+});
+
+// ─── Start ───────────────────────────────────────────────────────────────────
+app.listen(PORT, () => {
+  console.log(`Resolver listening on http://localhost:${PORT}`);
+  console.log(`Wyzie key: ${WYZIE_API_KEY ? '✓ set' : '⚠  not set — subtitles will always be empty (get free key at https://sub.wyzie.io/redeem)'}`);
+  if (!TMDB_API_KEY) {
+    console.warn('⚠  TMDB_API_KEY not set — ID resolution will use fallback (subtitles will likely be empty)');
+  }
+});
