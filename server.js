@@ -7,75 +7,53 @@ app.use(cors());
 
 const PORT = process.env.PORT || 3001;
 const TMDB_API_KEY = process.env.TMDB_API_KEY;
-const MEDIAFLOW_PROXY_URL = (process.env.MEDIAFLOW_PROXY_URL || 'https://phillybewillin-unhided.hf.space').replace(/\/$/, '');
-const MEDIAFLOW_PASSWORD = process.env.MEDIAFLOW_API_PASSWORD;
 const WYZIE_API_KEY = process.env.WYZIE_API_KEY;
 
 // ─── Addon Config ────────────────────────────────────────────────────────────
-// isProxy: true  →  HLS (.m3u8) stream URLs from this addon get routed through
-//                   MediaFlow before being returned to the client.
-//                   Non-HLS streams are returned as-is even for proxy addons.
-// fallbackBase   →  tried automatically if the primary base times out or 404s.
+// NOTE: isProxy has been removed entirely — streams are returned as-is.
 const ADDONS = {
   webstreamrmbg: {
     base: 'https://87d6a6ef6b58-webstreamrmbg.baby-beamup.club',
     fallbackBase: 'https://newman21-webstreamer-mbg.hf.space',
     name: 'WebStreamrMBG',
   },
-  nebulastreams: { base: 'https://florence-direct-rocks-info.trycloudflare.com', name: 'NebulaStreams' },
-  notorrent: { base: 'https://addon.notorrent2.workers.dev', name: 'NoTorrent' },
+  nebulastreams: {
+    base: 'https://nebulastreams.onrender.com',
+    name: 'NebulaStreams',
+  },
+  swordwatch: {
+    base: 'https://sword-watch.vercel.app',
+    name: 'SwordWatch',
+  },
   streamvix: { base: 'https://streamvix.hayd.uk', name: 'StreamVix' },
-  hdhub: { base: 'https://hdhub.thevolecitor.qzz.io', name: 'HdHub', isProxy: true },
-
-  // ── Proxy-required addons ────────────────────────────────────────────────
+  hdhub:     { base: 'https://hdhub.thevolecitor.qzz.io', name: 'HdHub' },
   cloudnestra: {
     base: 'https://cloudnestra.com',
     fallbackBase: 'https://www.cloudnestra.com',
     name: 'Cloudnestra',
-    isProxy: true,
   },
-  vidsrc_xyz: { base: 'https://vidsrc.xyz', name: 'VidSrc.xyz', isProxy: true },
-  vidsrc_to: { base: 'https://vidsrc.to', name: 'VidSrc.to', isProxy: true },
-  vidsrc_me: { base: 'https://vidsrc.me', name: 'VidSrc.me', isProxy: true },
-  vidsrc_pro: { base: 'https://vidsrc.pro', name: 'VidSrc.pro', isProxy: true },
+  vidsrc_xyz: { base: 'https://vidsrc.xyz',  name: 'VidSrc.xyz' },
+  vidsrc_to:  { base: 'https://vidsrc.to',   name: 'VidSrc.to'  },
+  vidsrc_me:  { base: 'https://vidsrc.me',   name: 'VidSrc.me'  },
+  vidsrc_pro: { base: 'https://vidsrc.pro',  name: 'VidSrc.pro' },
 };
 
 const WYZIE_BASE = 'https://sub.wyzie.io';
 
 // ─── Hostname Patch ──────────────────────────────────────────────────────────
-// Some addons return stream URLs with a bare hostname that is missing the
-// ".baby-beamup.club" suffix — e.g.:
-//   https://87d6a6ef6b58-webstreamrmbg/extract/?index=0&url=…
-// This function detects those (no dot in hostname) and appends the suffix so
-// the URL becomes valid before any further processing.
+// Some addons return stream URLs with a bare hostname missing ".baby-beamup.club".
 function fixHostname(url) {
   if (!url) return url;
   try {
     const parsed = new URL(url);
-    // A real public hostname always contains at least one dot.
-    // If there is none, assume .baby-beamup.club is missing.
     if (!parsed.hostname.includes('.')) {
       parsed.hostname = `${parsed.hostname}.baby-beamup.club`;
       return parsed.toString();
     }
   } catch (_) {
-    // Malformed URL — return as-is and let the caller decide.
+    // Malformed URL — return as-is.
   }
   return url;
-}
-
-// ─── MediaFlow Proxy Wrapper ─────────────────────────────────────────────────
-// Routes a stream URL through your self-hosted MediaFlow instance.
-//   .m3u8  →  /proxy/hls    (re-proxies every segment inside the manifest)
-//   other  →  /proxy/stream (single-file HTTP proxy)
-// The api_password param is appended only when the env var is set.
-function wrapWithProxy(streamUrl) {
-  if (!streamUrl || !MEDIAFLOW_PROXY_URL) return streamUrl;
-  const endpoint = streamUrl.includes('.m3u8') ? 'proxy/hls' : 'proxy/stream';
-  const out = new URL(`${MEDIAFLOW_PROXY_URL}/${endpoint}`);
-  out.searchParams.set('d', streamUrl);
-  if (MEDIAFLOW_PASSWORD) out.searchParams.set('api_password', MEDIAFLOW_PASSWORD);
-  return out.toString();
 }
 
 // ─── TMDB → IMDB Resolution Cache ───────────────────────────────────────────
@@ -133,15 +111,31 @@ function parseQuality(text) {
 function inferStreamType(url) {
   if (!url) return 'other';
   if (url.includes('.m3u8')) return 'hls';
-  if (url.includes('.mp4')) return 'mp4';
+  if (url.includes('.mp4'))  return 'mp4';
   return 'other';
 }
 
+// ─── .zip URL Fix ─────────────────────────────────────────────────────────────
+// Some addons (e.g. HdHub) append .zip to what is actually an .mkv/.mp4 URL.
+// Strip the trailing .zip so the browser/player receives the real file extension.
+function stripZipExtension(url) {
+  if (!url) return url;
+  return url.replace(/\.zip(\?.*)?$/, (_, qs) => (qs || ''));
+}
+
+// ─── NoTorrent Locked Stream Filter ──────────────────────────────────────────
+// NoTorrent returns placeholder "locked" streams (🔒 in the title) that require
+// a premium account and all resolve to the same dummy URL — useless to everyone.
+function isLockedNoTorrentStream(addonKey, stream) {
+  if (addonKey !== 'notorrent') return false;
+  const text = `${stream.name || ''} ${stream.title || ''}`;
+  return text.includes('🔒');
+}
+
 // ─── Fetch Streams from a Single Addon ───────────────────────────────────────
-// Handles the fallbackBase retry transparently so callers don't need to know.
 async function fetchAddonStreams(addonKey, addonId, type, season, episode) {
   const addon = ADDONS[addonKey];
-  const idPart = type === 'tv' ? `${addonId}:${season}:${episode}` : addonId;
+  const idPart      = type === 'tv' ? `${addonId}:${season}:${episode}` : addonId;
   const contentType = type === 'tv' ? 'series' : 'movie';
 
   async function tryBase(base) {
@@ -172,36 +166,29 @@ async function fetchAddonStreams(addonKey, addonId, type, season, episode) {
         rawStreams = await tryBase(addon.fallbackBase);
       } catch (fallbackErr) {
         console.error(`${addon.name} fallback also failed:`, fallbackErr.message);
-        return null;
+        throw fallbackErr; // bubble up so caller gets the real message
       }
     } else {
-      console.error(`${addon.name} fetch failed:`, primaryErr.message);
-      return null;
+      throw primaryErr; // bubble up so caller gets the real message
     }
   }
 
   return rawStreams
-    // ── FIX 1: drop streams that have no URL ────────────────────────────────
-    .filter((s) => s.url)
+    // Drop streams with no URL, or NoTorrent locked/placeholder entries.
+    .filter((s) => s.url && !isLockedNoTorrentStream(addonKey, s))
     .map((s) => {
       const qualityText = `${s.name || ''} ${s.title || ''}`;
+      // Strip trailing .zip so e.g. "file.mkv.zip" is treated as "file.mkv"
+      const rawUrl      = fixHostname(stripZipExtension(s.url));
+      const streamType  = inferStreamType(rawUrl);
 
-      // ── FIX 3: patch any URL whose hostname is missing .baby-beamup.club ──
-      const rawUrl = fixHostname(s.url);
-
-      // Derive type once and reuse — avoids checking the URL string twice.
-      const streamType = inferStreamType(rawUrl);
-
-      // ── FIX 2: only proxy HLS streams, even for isProxy addons ─────────────
-      //    mp4 / other stream types are returned directly to the client.
-      const streamUrl = (addon.isProxy && streamType === 'hls') ? wrapWithProxy(rawUrl) : rawUrl;
-
+      // Streams are returned as-is — no proxying.
       return {
-        url: streamUrl,
-        type: streamType,
-        label: `${addon.name} • ${s.title || s.name || 'Unknown'}`,
+        url:     rawUrl,
+        type:    streamType,
+        label:   `${addon.name} • ${s.title || s.name || 'Unknown'}`,
         quality: parseQuality(qualityText),
-        addon: addonKey,
+        addon:   addonKey,
       };
     });
 }
@@ -220,21 +207,26 @@ async function fetchSubtitles(wyzieId, type, season, episode) {
   let url = `${WYZIE_BASE}/search?id=${encodeURIComponent(wyzieId)}&key=${WYZIE_API_KEY}`;
   if (type === 'tv') url += `&season=${season}&episode=${episode}`;
 
+  // 12 s — longer than the addon fetches since Wyzie can be slow, and this
+  // runs in parallel with them so it doesn't add to total wall-clock time.
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8000);
+  const timeout = setTimeout(() => controller.abort(), 12000);
 
   try {
     const res = await fetch(url, { signal: controller.signal });
     clearTimeout(timeout);
-    if (!res.ok) throw new Error(`Wyzie HTTP ${res.status}: ${res.statusText} `);
+    if (!res.ok) throw new Error(`Wyzie HTTP ${res.status}: ${res.statusText}`);
 
-    const raw = await res.json();
-    const list = Array.isArray(raw) ? raw : (Array.isArray(raw?.results) ? raw.results : []);
+    const raw  = await res.json();
+    const list = Array.isArray(raw)
+      ? raw
+      : Array.isArray(raw?.results)
+        ? raw.results
+        : [];
 
-    // Drop formats that don't work on web — keep only srt and vtt.
-    // SRT gets converted client-side; VTT works natively with <track>.
+    // Keep only srt and vtt — the only formats that work on web.
     const WEB_FORMATS = new Set(['srt', 'vtt']);
-    const compatible = list.filter((sub) =>
+    const compatible  = list.filter((sub) =>
       WEB_FORMATS.has((sub.format || '').toLowerCase())
     );
 
@@ -243,22 +235,18 @@ async function fetchSubtitles(wyzieId, type, season, episode) {
       return [];
     }
 
-    // For English: keep ALL variants (regular, SDH, HI, CC) — they cover
-    // different portions of the audio so more is better.
-    // For every other language: deduplicate to the first (highest-ranked) hit.
-    const seenNonEn = new Set();
-    const seenEnKeys = new Set(); // de-dupe exact (lang+isHI+display) combos
-    const unique = [];
+    const seenNonEn  = new Set();
+    const seenEnKeys = new Set();
+    const unique     = [];
 
     for (const sub of compatible) {
-      const lang = (sub.language || sub.lang || '').toLowerCase();
+      const lang    = (sub.language || sub.lang || '').toLowerCase();
       if (!lang) continue;
 
-      const isHI = !!(sub.isHearingImpaired || sub.isHI);
+      const isHI    = !!(sub.isHearingImpaired || sub.isHI);
       const display = sub.display || sub.language || sub.lang || '';
 
       if (lang.startsWith('en')) {
-        // Unique key: language + HI flag + display label
         const key = `${lang}|${isHI}|${display.toLowerCase()}`;
         if (seenEnKeys.has(key)) continue;
         seenEnKeys.add(key);
@@ -268,20 +256,18 @@ async function fetchSubtitles(wyzieId, type, season, episode) {
       }
 
       unique.push({
-        url: sub.url,
-        lang: sub.language || sub.lang || '',
+        url:     sub.url,
+        lang:    sub.language || sub.lang || '',
         display,
-        format: sub.format || 'srt',
+        format:  sub.format || 'srt',
         isHI,
       });
     }
 
-    // Sort: English first (regular before SDH/HI), then alphabetical by display
     unique.sort((a, b) => {
       const aEn = a.lang.toLowerCase().startsWith('en') ? 0 : 1;
       const bEn = b.lang.toLowerCase().startsWith('en') ? 0 : 1;
       if (aEn !== bEn) return aEn - bEn;
-      // Within English: non-HI before HI
       if (aEn === 0 && bEn === 0) {
         if (a.isHI !== b.isHI) return a.isHI ? 1 : -1;
       }
@@ -292,12 +278,12 @@ async function fetchSubtitles(wyzieId, type, season, episode) {
   } catch (err) {
     clearTimeout(timeout);
     console.error('Wyzie fetch failed:', err.message);
-    return [];
+    // Surface a meaningful error string so it appears in the API response.
+    throw new Error(`Wyzie: ${err.message}`);
   }
 }
 
 // ─── Big File Detection ──────────────────────────────────────────────────────
-// Catches "13.46GB" (WebStreamrMBG) and "💾 13.46 GB" label formats.
 function isBigFile(label) {
   const match = label.match(/(\d+(?:\.\d+)?)\s*GB/i);
   if (!match) return false;
@@ -307,30 +293,23 @@ function isBigFile(label) {
 // ─── Addon Sort Weight ───────────────────────────────────────────────────────
 const ADDON_ORDER = {
   webstreamrmbg: 0,
-  nebulastreams: 1,
-  notorrent: 2,
-  streamvix: 3,
-  hdhub: 4,
-  cloudnestra: 10,
-  vidsrc_xyz: 11,
-  vidsrc_to: 12,
-  vidsrc_me: 13,
-  vidsrc_pro: 14,
+  nebulastreams:  1,
+  swordwatch:     2,
+  streamvix:      3,
+  hdhub:          4,
+  cloudnestra:   10,
+  vidsrc_xyz:    11,
+  vidsrc_to:     12,
+  vidsrc_me:     13,
+  vidsrc_pro:    14,
 };
 
 // ─── Sort Merged Sources ─────────────────────────────────────────────────────
-// Order: 1080p → 720p → 480p → auto → 4k  (direct-play)
-//        cloudnestra → vidsrc variants     (proxy, same quality buckets)
-//        big files ≥ 5 GB                  (absolute bottom)
 function sortSources(sources) {
   return sources.sort((a, b) => {
     const aBig = isBigFile(a.label) ? 1 : 0;
     const bBig = isBigFile(b.label) ? 1 : 0;
     if (aBig !== bBig) return aBig - bBig;
-
-    const aProxy = ADDONS[a.addon]?.isProxy ? 1 : 0;
-    const bProxy = ADDONS[b.addon]?.isProxy ? 1 : 0;
-    if (aProxy !== bProxy) return aProxy - bProxy;
 
     const qa = QUALITY_ORDER[a.quality] ?? 3;
     const qb = QUALITY_ORDER[b.quality] ?? 3;
@@ -340,14 +319,23 @@ function sortSources(sources) {
   });
 }
 
+// ─── Deduplication ───────────────────────────────────────────────────────────
+// Drop sources with an identical URL that have already appeared in the list.
+function deduplicate(sources) {
+  const seen = new Set();
+  return sources.filter((s) => {
+    if (seen.has(s.url)) return false;
+    seen.add(s.url);
+    return true;
+  });
+}
+
 // ─── Routes ──────────────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
   res.json({
-    ok: true,
+    ok:        true,
     timestamp: Date.now(),
-    mediaflowProxy: MEDIAFLOW_PROXY_URL,
-    mediaflowPassword: MEDIAFLOW_PASSWORD ? '✓ set' : '✗ not set',
-    wyzieKey: WYZIE_API_KEY ? '✓ set' : '✗ not set — subtitles will be empty',
+    wyzieKey:  WYZIE_API_KEY ? '✓ set' : '✗ not set — subtitles will always be empty (get free key at https://sub.wyzie.io/redeem)',
   });
 });
 
@@ -372,32 +360,38 @@ app.get('/api/streams', async (req, res) => {
     const { addonId, wyzieId } = await resolveId(tmdbId, type);
 
     const [
-      webstreamrmbgR, nebulastreamR, notorrentR, streamvixR, hdhubR,
+      webstreamrmbgR,
+      nebulastreamR,
+      swordwatchR,
+      streamvixR,
+      hdhubR,
       cloudnestraR,
-      vidsrcXyzR, vidsrcToR, vidsrcMeR, vidsrcProR,
+      vidsrcXyzR,
+      vidsrcToR,
+      vidsrcMeR,
+      vidsrcProR,
       subtitlesR,
     ] = await Promise.allSettled([
-      fetchAddonStreams('webstreamrmbg', addonId, type, season, episode),
-      // NebulaStreams only accepts tt-prefixed IMDB IDs — use wyzieId
-      fetchAddonStreams('nebulastreams', wyzieId, type, season, episode),
-      fetchAddonStreams('notorrent', addonId, type, season, episode),
-      fetchAddonStreams('streamvix', addonId, type, season, episode),
-      fetchAddonStreams('hdhub', addonId, type, season, episode),
-      fetchAddonStreams('cloudnestra', addonId, type, season, episode),
-      fetchAddonStreams('vidsrc_xyz', addonId, type, season, episode),
-      fetchAddonStreams('vidsrc_to', addonId, type, season, episode),
-      fetchAddonStreams('vidsrc_me', addonId, type, season, episode),
-      fetchAddonStreams('vidsrc_pro', addonId, type, season, episode),
+      fetchAddonStreams('webstreamrmbg', addonId,  type, season, episode),
+      fetchAddonStreams('nebulastreams', wyzieId,  type, season, episode),
+      fetchAddonStreams('swordwatch',    addonId,  type, season, episode),
+      fetchAddonStreams('streamvix',     addonId,  type, season, episode),
+      fetchAddonStreams('hdhub',         addonId,  type, season, episode),
+      fetchAddonStreams('cloudnestra',   addonId,  type, season, episode),
+      fetchAddonStreams('vidsrc_xyz',    addonId,  type, season, episode),
+      fetchAddonStreams('vidsrc_to',     addonId,  type, season, episode),
+      fetchAddonStreams('vidsrc_me',     addonId,  type, season, episode),
+      fetchAddonStreams('vidsrc_pro',    addonId,  type, season, episode),
       fetchSubtitles(wyzieId, type, season, episode),
     ]);
 
     const streams = (r) =>
       r.status === 'fulfilled' && Array.isArray(r.value) ? r.value : [];
 
-    const allSources = sortSources([
+    const allSources = deduplicate(sortSources([
       ...streams(webstreamrmbgR),
       ...streams(nebulastreamR),
-      ...streams(notorrentR),
+      ...streams(swordwatchR),
       ...streams(streamvixR),
       ...streams(hdhubR),
       ...streams(cloudnestraR),
@@ -405,51 +399,22 @@ app.get('/api/streams', async (req, res) => {
       ...streams(vidsrcToR),
       ...streams(vidsrcMeR),
       ...streams(vidsrcProR),
-    ]);
+    ]));
 
     const subtitles = subtitlesR.status === 'fulfilled' ? subtitlesR.value : [];
 
+    // ── Build detailed error list ─────────────────────────────────────────
     const addonResults = {
       WebStreamrMBG: webstreamrmbgR,
-      NebulaStreams: nebulastreamR,
-      NoTorrent: notorrentR,
-      StreamVix: streamvixR,
-      HdHub: hdhubR,
-      Cloudnestra: cloudnestraR,
-      'VidSrc.xyz': vidsrcXyzR,
-      'VidSrc.to': vidsrcToR,
-      'VidSrc.me': vidsrcMeR,
-      'VidSrc.pro': vidsrcProR,
+      NebulaStreams:  nebulastreamR,
+      SwordWatch:     swordwatchR,
+      StreamVix:      streamvixR,
+      HdHub:          hdhubR,
+      Cloudnestra:    cloudnestraR,
+      'VidSrc.xyz':   vidsrcXyzR,
+      'VidSrc.to':    vidsrcToR,
+      'VidSrc.me':    vidsrcMeR,
+      'VidSrc.pro':   vidsrcProR,
     };
 
-    const errors = Object.entries(addonResults)
-      .filter(([, r]) => r.status === 'rejected' || r.value === null)
-      .map(([name]) => `${name} failed`);
-
-    if (allSources.length === 0 && errors.length > 0) errors.push('No streams available');
-
-    res.json({
-      resolvedId: addonId,
-      sources: allSources,
-      subtitles,
-      error: errors.length > 0 ? errors.join('; ') : null,
-    });
-  } catch (err) {
-    console.error('Unhandled error in /api/streams:', err);
-    res.json({
-      resolvedId: null, sources: [], subtitles: [],
-      error: err.message || 'Internal server error',
-    });
-  }
-});
-
-// ─── Start ───────────────────────────────────────────────────────────────────
-app.listen(PORT, () => {
-  console.log(`Resolver listening on http://localhost:${PORT}`);
-  console.log(`MediaFlow proxy : ${MEDIAFLOW_PROXY_URL}`);
-  console.log(`MediaFlow pass  : ${MEDIAFLOW_PASSWORD ? '✓ set' : '⚠  not set — proxy endpoints will reject requests'}`);
-  console.log(`Wyzie key       : ${WYZIE_API_KEY ? '✓ set' : '⚠  not set — subtitles will always be empty (get free key at https://sub.wyzie.io/redeem)'}`);
-  if (!TMDB_API_KEY) {
-    console.warn('⚠  TMDB_API_KEY not set — ID resolution will use fallback (subtitles will likely be empty)');
-  }
-});
+    const errors
