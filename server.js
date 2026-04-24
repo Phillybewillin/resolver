@@ -41,13 +41,8 @@ const ADDONS = {
     base: 'https://sword-watch.vercel.app',
     name: 'SwordWatch',
   },
-  streamvix:   { base: 'https://streamvix.hayd.uk',          name: 'StreamVix'   },
-  hdhub:       { base: 'https://hdhub.thevolecitor.qzz.io',  name: 'HdHub'       },
-  cloudnestra: { base: 'https://cloudnestra.com', fallbackBase: 'https://www.cloudnestra.com', name: 'Cloudnestra' },
-  vidsrc_xyz:  { base: 'https://vidsrc.xyz',  name: 'VidSrc.xyz' },
-  vidsrc_to:   { base: 'https://vidsrc.to',   name: 'VidSrc.to'  },
-  vidsrc_me:   { base: 'https://vidsrc.me',   name: 'VidSrc.me'  },
-  vidsrc_pro:  { base: 'https://vidsrc.pro',  name: 'VidSrc.pro' },
+  streamvix: { base: 'https://streamvix.hayd.uk',         name: 'StreamVix' },
+  hdhub:     { base: 'https://hdhub.thevolecitor.qzz.io', name: 'HdHub'     },
 };
 
 const WYZIE_BASE = 'https://sub.wyzie.io';
@@ -196,8 +191,7 @@ async function fetchAddonStreams(addonKey, addonId, type, season, episode) {
       const rawUrl      = fixHostname(stripZipExtension(s.url));
       const streamType  = inferStreamType(rawUrl);
 
-      // Proxy HLS if the stream's domain is CORS-blocked, regardless of addon.
-      const finalUrl = (streamType === 'hls' && requiresProxy(rawUrl))
+      const finalUrl = requiresProxy(streamType)
         ? wrapWithProxy(rawUrl)
         : rawUrl;
 
@@ -212,24 +206,9 @@ async function fetchAddonStreams(addonKey, addonId, type, season, episode) {
 }
 
 // ─── Domains that require proxying ───────────────────────────────────────────
-// Any HLS stream whose hostname matches these domains must go through MediaFlow
-// regardless of which addon returned it — they are CORS-blocked in the browser.
-const PROXY_DOMAINS = new Set([
-  'cloudnestra.com',
-  'vidsrc.xyz',
-  'vidsrc.to',
-  'vidsrc.me',
-  'vidsrc.pro',
-]);
-
-function requiresProxy(url) {
-  if (!url || !MEDIAFLOW_PROXY_URL) return false;
-  try {
-    const hostname = new URL(url).hostname.replace(/^www\./, '');
-    return PROXY_DOMAINS.has(hostname);
-  } catch (_) {
-    return false;
-  }
+// Proxy any HLS stream — HLS is always CORS-blocked in the browser.
+function requiresProxy(streamType) {
+  return streamType === 'hls' && !!MEDIAFLOW_PROXY_URL;
 }
 async function fetchSubtitles(wyzieId, type, season, episode) {
   if (!String(wyzieId).startsWith('tt')) {
@@ -404,23 +383,13 @@ app.get('/api/streams', async (req, res) => {
       swordwatchR,
       streamvixR,
       hdhubR,
-      cloudnestraR,
-      vidsrcXyzR,
-      vidsrcToR,
-      vidsrcMeR,
-      vidsrcProR,
       subtitlesR,
     ] = await Promise.allSettled([
-      fetchAddonStreams('webstreamrmbg', addonId,  type, season, episode),
-      fetchAddonStreams('nebulastreams', wyzieId,  type, season, episode),
-      fetchAddonStreams('swordwatch',    addonId,  type, season, episode),
-      fetchAddonStreams('streamvix',     addonId,  type, season, episode),
-      fetchAddonStreams('hdhub',         addonId,  type, season, episode),
-      fetchAddonStreams('cloudnestra',   addonId,  type, season, episode),
-      fetchAddonStreams('vidsrc_xyz',    addonId,  type, season, episode),
-      fetchAddonStreams('vidsrc_to',     addonId,  type, season, episode),
-      fetchAddonStreams('vidsrc_me',     addonId,  type, season, episode),
-      fetchAddonStreams('vidsrc_pro',    addonId,  type, season, episode),
+      fetchAddonStreams('webstreamrmbg', addonId, type, season, episode),
+      fetchAddonStreams('nebulastreams', wyzieId, type, season, episode),
+      fetchAddonStreams('swordwatch',    addonId, type, season, episode),
+      fetchAddonStreams('streamvix',     addonId, type, season, episode),
+      fetchAddonStreams('hdhub',         addonId, type, season, episode),
       fetchSubtitles(wyzieId, type, season, episode),
     ]);
 
@@ -433,27 +402,16 @@ app.get('/api/streams', async (req, res) => {
       ...streams(swordwatchR),
       ...streams(streamvixR),
       ...streams(hdhubR),
-      ...streams(cloudnestraR),
-      ...streams(vidsrcXyzR),
-      ...streams(vidsrcToR),
-      ...streams(vidsrcMeR),
-      ...streams(vidsrcProR),
     ]));
 
     const subtitles = subtitlesR.status === 'fulfilled' ? subtitlesR.value : [];
 
-    // ── Build detailed error list ─────────────────────────────────────────
     const addonResults = {
       WebStreamrMBG: webstreamrmbgR,
       NebulaStreams:  nebulastreamR,
       SwordWatch:     swordwatchR,
       StreamVix:      streamvixR,
       HdHub:          hdhubR,
-      Cloudnestra:    cloudnestraR,
-      'VidSrc.xyz':   vidsrcXyzR,
-      'VidSrc.to':    vidsrcToR,
-      'VidSrc.me':    vidsrcMeR,
-      'VidSrc.pro':   vidsrcProR,
     };
 
     const errors = Object.entries(addonResults)
