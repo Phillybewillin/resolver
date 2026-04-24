@@ -8,6 +8,22 @@ app.use(cors());
 const PORT = process.env.PORT || 3001;
 const TMDB_API_KEY = process.env.TMDB_API_KEY;
 const WYZIE_API_KEY = process.env.WYZIE_API_KEY;
+const MEDIAFLOW_PROXY_URL = (process.env.MEDIAFLOW_PROXY_URL || '').replace(/\/$/, '');
+const MEDIAFLOW_PASSWORD = process.env.MEDIAFLOW_API_PASSWORD;
+
+// ─── MediaFlow Proxy Wrapper ──────────────────────────────────────────────────
+// Correct endpoints per https://mhdzumair.github.io/mediaflow-proxy/usage/overview/
+//   HLS (.m3u8)  →  /proxy/hls/manifest.m3u8
+//   everything else →  /proxy/stream
+function wrapWithProxy(streamUrl) {
+  if (!streamUrl || !MEDIAFLOW_PROXY_URL) return streamUrl;
+  const isHls    = streamUrl.includes('.m3u8');
+  const endpoint = isHls ? 'proxy/hls/manifest.m3u8' : 'proxy/stream';
+  const out      = new URL(`${MEDIAFLOW_PROXY_URL}/${endpoint}`);
+  out.searchParams.set('d', streamUrl);
+  if (MEDIAFLOW_PASSWORD) out.searchParams.set('api_password', MEDIAFLOW_PASSWORD);
+  return out.toString();
+}
 
 // ─── Addon Config ────────────────────────────────────────────────────────────
 // NOTE: isProxy has been removed entirely — streams are returned as-is.
@@ -26,16 +42,20 @@ const ADDONS = {
     name: 'SwordWatch',
   },
   streamvix: { base: 'https://streamvix.hayd.uk', name: 'StreamVix' },
-  hdhub:     { base: 'https://hdhub.thevolecitor.qzz.io', name: 'HdHub' },
+  // isProxy: HdHub Castle HLS streams are IP-signed server-side — the CDN
+  // blocks browser-direct requests. Route them through MediaFlow using the
+  // correct /proxy/hls/manifest.m3u8 endpoint.
+  hdhub: { base: 'https://hdhub.thevolecitor.qzz.io', name: 'HdHub', isProxy: true },
   cloudnestra: {
     base: 'https://cloudnestra.com',
     fallbackBase: 'https://www.cloudnestra.com',
     name: 'Cloudnestra',
+    isProxy: true,
   },
-  vidsrc_xyz: { base: 'https://vidsrc.xyz',  name: 'VidSrc.xyz' },
-  vidsrc_to:  { base: 'https://vidsrc.to',   name: 'VidSrc.to'  },
-  vidsrc_me:  { base: 'https://vidsrc.me',   name: 'VidSrc.me'  },
-  vidsrc_pro: { base: 'https://vidsrc.pro',  name: 'VidSrc.pro' },
+  vidsrc_xyz: { base: 'https://vidsrc.xyz',  name: 'VidSrc.xyz', isProxy: true },
+  vidsrc_to:  { base: 'https://vidsrc.to',   name: 'VidSrc.to',  isProxy: true },
+  vidsrc_me:  { base: 'https://vidsrc.me',   name: 'VidSrc.me',  isProxy: true },
+  vidsrc_pro: { base: 'https://vidsrc.pro',  name: 'VidSrc.pro', isProxy: true },
 };
 
 const WYZIE_BASE = 'https://sub.wyzie.io';
@@ -174,17 +194,24 @@ async function fetchAddonStreams(addonKey, addonId, type, season, episode) {
   }
 
   return rawStreams
-    // Drop streams with no URL, or NoTorrent locked/placeholder entries.
-    .filter((s) => s.url && !isLockedNoTorrentStream(addonKey, s))
+    .filter((s) => {
+      if (!s.url) return false;
+      if (isLockedNoTorrentStream(addonKey, s)) return false;
+      return true;
+    })
     .map((s) => {
       const qualityText = `${s.name || ''} ${s.title || ''}`;
-      // Strip trailing .zip so e.g. "file.mkv.zip" is treated as "file.mkv"
       const rawUrl      = fixHostname(stripZipExtension(s.url));
       const streamType  = inferStreamType(rawUrl);
 
-      // Streams are returned as-is — no proxying.
+      // Only proxy HLS from addons whose CDN is IP-signed (isProxy: true).
+      // Non-HLS (direct downloads) are always returned as-is.
+      const finalUrl = (addon.isProxy && streamType === 'hls')
+        ? wrapWithProxy(rawUrl)
+        : rawUrl;
+
       return {
-        url:     rawUrl,
+        url:     finalUrl,
         type:    streamType,
         label:   `${addon.name} • ${s.title || s.name || 'Unknown'}`,
         quality: parseQuality(qualityText),
@@ -207,10 +234,10 @@ async function fetchSubtitles(wyzieId, type, season, episode) {
   let url = `${WYZIE_BASE}/search?id=${encodeURIComponent(wyzieId)}&key=${WYZIE_API_KEY}`;
   if (type === 'tv') url += `&season=${season}&episode=${episode}`;
 
-  // 12 s — longer than the addon fetches since Wyzie can be slow, and this
-  // runs in parallel with them so it doesn't add to total wall-clock time.
+  // 25 s — Wyzie can be slow. vercel.json sets maxDuration to 30 so this
+  // safely fits within the function lifetime even on Pro.
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12000);
+  const timeout = setTimeout(() => controller.abort(), 25000);
 
   try {
     const res = await fetch(url, { signal: controller.signal });
@@ -305,6 +332,8 @@ const ADDON_ORDER = {
 };
 
 // ─── Sort Merged Sources ─────────────────────────────────────────────────────
+// Priority: non-big → quality (1080p first) → addon order
+
 function sortSources(sources) {
   return sources.sort((a, b) => {
     const aBig = isBigFile(a.label) ? 1 : 0;
