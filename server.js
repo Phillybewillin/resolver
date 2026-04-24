@@ -41,21 +41,13 @@ const ADDONS = {
     base: 'https://sword-watch.vercel.app',
     name: 'SwordWatch',
   },
-  streamvix: { base: 'https://streamvix.hayd.uk', name: 'StreamVix' },
-  // isProxy: HdHub Castle HLS streams are IP-signed server-side — the CDN
-  // blocks browser-direct requests. Route them through MediaFlow using the
-  // correct /proxy/hls/manifest.m3u8 endpoint.
-  hdhub: { base: 'https://hdhub.thevolecitor.qzz.io', name: 'HdHub', isProxy: true },
-  cloudnestra: {
-    base: 'https://cloudnestra.com',
-    fallbackBase: 'https://www.cloudnestra.com',
-    name: 'Cloudnestra',
-    isProxy: true,
-  },
-  vidsrc_xyz: { base: 'https://vidsrc.xyz',  name: 'VidSrc.xyz', isProxy: true },
-  vidsrc_to:  { base: 'https://vidsrc.to',   name: 'VidSrc.to',  isProxy: true },
-  vidsrc_me:  { base: 'https://vidsrc.me',   name: 'VidSrc.me',  isProxy: true },
-  vidsrc_pro: { base: 'https://vidsrc.pro',  name: 'VidSrc.pro', isProxy: true },
+  streamvix:   { base: 'https://streamvix.hayd.uk',          name: 'StreamVix'   },
+  hdhub:       { base: 'https://hdhub.thevolecitor.qzz.io',  name: 'HdHub'       },
+  cloudnestra: { base: 'https://cloudnestra.com', fallbackBase: 'https://www.cloudnestra.com', name: 'Cloudnestra' },
+  vidsrc_xyz:  { base: 'https://vidsrc.xyz',  name: 'VidSrc.xyz' },
+  vidsrc_to:   { base: 'https://vidsrc.to',   name: 'VidSrc.to'  },
+  vidsrc_me:   { base: 'https://vidsrc.me',   name: 'VidSrc.me'  },
+  vidsrc_pro:  { base: 'https://vidsrc.pro',  name: 'VidSrc.pro' },
 };
 
 const WYZIE_BASE = 'https://sub.wyzie.io';
@@ -204,9 +196,8 @@ async function fetchAddonStreams(addonKey, addonId, type, season, episode) {
       const rawUrl      = fixHostname(stripZipExtension(s.url));
       const streamType  = inferStreamType(rawUrl);
 
-      // Only proxy HLS from addons whose CDN is IP-signed (isProxy: true).
-      // Non-HLS (direct downloads) are always returned as-is.
-      const finalUrl = (addon.isProxy && streamType === 'hls')
+      // Proxy HLS if the stream's domain is CORS-blocked, regardless of addon.
+      const finalUrl = (streamType === 'hls' && requiresProxy(rawUrl))
         ? wrapWithProxy(rawUrl)
         : rawUrl;
 
@@ -220,7 +211,26 @@ async function fetchAddonStreams(addonKey, addonId, type, season, episode) {
     });
 }
 
-// ─── Fetch Subtitles from Wyzie ──────────────────────────────────────────────
+// ─── Domains that require proxying ───────────────────────────────────────────
+// Any HLS stream whose hostname matches these domains must go through MediaFlow
+// regardless of which addon returned it — they are CORS-blocked in the browser.
+const PROXY_DOMAINS = new Set([
+  'cloudnestra.com',
+  'vidsrc.xyz',
+  'vidsrc.to',
+  'vidsrc.me',
+  'vidsrc.pro',
+]);
+
+function requiresProxy(url) {
+  if (!url || !MEDIAFLOW_PROXY_URL) return false;
+  try {
+    const hostname = new URL(url).hostname.replace(/^www\./, '');
+    return PROXY_DOMAINS.has(hostname);
+  } catch (_) {
+    return false;
+  }
+}
 async function fetchSubtitles(wyzieId, type, season, episode) {
   if (!String(wyzieId).startsWith('tt')) {
     console.warn(`⚠  Wyzie lookup using raw ID "${wyzieId}" — expect empty results without an IMDB ID`);
