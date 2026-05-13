@@ -61,10 +61,11 @@ const WEBSTREAMR_CONFIG = process.env.WEBSTREAMR_CONFIG || buildWebStreamrConfig
 const ADDONS = {
   webstreamrmbg: {
     base: `https://87d6a6ef6b58-webstreamrmbg.baby-beamup.club/${WEBSTREAMR_CONFIG}`,
-    fallbackBase: `https://newman21-webstreamer-mbg.hf.space/${WEBSTREAMR_CONFIG}`,
+    // HF fallback removed — it consistently returns 404 (different/stale deployment)
     name: 'WebStreamrMBG',
-    timeout: 8000,
+    timeout: 20000,              // addon can be slow; 8 s was causing false aborts
     selfProxiesViaConfig: true,  // MediaFlow creds are baked into the config URL — addon proxies itself
+    requiresImdbId: true,        // only accepts tt-prefixed IDs; skip if resolution failed
   },
   nebulastreams: {
     base: 'https://nebulastreams.onrender.com',
@@ -194,6 +195,14 @@ async function wakePing(base) {
 // ─── Fetch Streams from a Single Addon ───────────────────────────────────────
 async function fetchAddonStreams(addonKey, addonId, type, season, episode) {
   const addon = ADDONS[addonKey];
+
+  // Guard: some addons only work with IMDB tt-prefixed IDs.
+  // If TMDB resolution failed and we only have a raw TMDB ID, skip rather than
+  // send a guaranteed-bad request and waste the timeout.
+  if (addon.requiresImdbId && !String(addonId).startsWith('tt')) {
+    throw new Error(`skipped — no IMDB ID (got "${addonId}")`);
+  }
+
   const idPart      = type === 'tv' ? `${addonId}:${season}:${episode}` : addonId;
   const contentType = type === 'tv' ? 'series' : 'movie';
   const addonTimeout = addon.timeout ?? 8000;
@@ -446,7 +455,7 @@ app.get('/api/streams', async (req, res) => {
       hdhubR,
       subtitlesR,
     ] = await Promise.allSettled([
-      fetchAddonStreams('webstreamrmbg', addonId, type, season, episode),
+      fetchAddonStreams('webstreamrmbg', wyzieId, type, season, episode),  // must be IMDB tt-id
       fetchAddonStreams('nebulastreams', wyzieId, type, season, episode),
       fetchAddonStreams('swordwatch',    addonId, type, season, episode),
       fetchAddonStreams('streamvix',     addonId, type, season, episode),
