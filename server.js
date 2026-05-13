@@ -26,23 +26,52 @@ function wrapWithProxy(streamUrl) {
 }
 
 // ─── Addon Config ────────────────────────────────────────────────────────────
-// NOTE: isProxy has been removed entirely — streams are returned as-is.
+//
+// FIX 1 — WebStreamrMBG 404
+// ─────────────────────────
+// WebStreamrMBG is a configurable Stremio addon. Its stream URL requires a
+// base64url-encoded config segment between the host and /stream/:
+//
+//   {base}/{encodedConfig}/stream/{type}/{id}.json
+//
+// Without this segment the server returns 404. The default config enables
+// only "multi" (the manifest default). Encoded:
+//   btoa(JSON.stringify({"multi":"true"})) → eyJtdWx0aSI6InRydWUifQ==
+//
+// Override via env var WEBSTREAMR_CONFIG if you install with custom settings
+// (e.g. specific languages). Find your config string by copying the path
+// segment from your installed manifest URL.
+//
+// FIX 2 — NebulaStreams timeout
+// ──────────────────────────────
+// NebulaStreams runs on Render.com free tier which cold-starts in 30–60 s.
+// The old 8 s timeout aborted the request before the server even woke up.
+// Nebula now gets its own generous timeout (55 s) plus a "wake" pre-ping so
+// the actual stream fetch arrives at a warm instance.
+// All other addons keep the fast 8 s timeout.
+//
+const WEBSTREAMR_CONFIG = process.env.WEBSTREAMR_CONFIG || 'eyJtdWx0aSI6InRydWUifQ==';
+
 const ADDONS = {
   webstreamrmbg: {
-    base: 'https://87d6a6ef6b58-webstreamrmbg.baby-beamup.club',
-    fallbackBase: 'https://newman21-webstreamer-mbg.hf.space',
+    base: `https://87d6a6ef6b58-webstreamrmbg.baby-beamup.club/${WEBSTREAMR_CONFIG}`,
+    fallbackBase: `https://newman21-webstreamer-mbg.hf.space/${WEBSTREAMR_CONFIG}`,
     name: 'WebStreamrMBG',
+    timeout: 8000,
   },
   nebulastreams: {
     base: 'https://nebulastreams.onrender.com',
     name: 'NebulaStreams',
+    timeout: 55000,   // Render free-tier cold start can take up to ~60 s
+    wakeBeforeFetch: true,
   },
   swordwatch: {
     base: 'https://sword-watch.vercel.app',
     name: 'SwordWatch',
+    timeout: 8000,
   },
-  streamvix: { base: 'https://streamvix.hayd.uk',         name: 'StreamVix' },
-  hdhub:     { base: 'https://hdhub.thevolecitor.qzz.io', name: 'HdHub'     },
+  streamvix: { base: 'https://streamvix.hayd.uk',         name: 'StreamVix', timeout: 8000 },
+  hdhub:     { base: 'https://hdhub.thevolecitor.qzz.io', name: 'HdHub',     timeout: 8000 },
 };
 
 const WYZIE_BASE = 'https://sub.wyzie.io';
@@ -139,16 +168,37 @@ function isLockedNoTorrentStream(addonKey, stream) {
   return text.includes('🔒');
 }
 
+// ─── Wake Ping (Render cold-start mitigation) ────────────────────────────────
+// Fire a lightweight GET to the addon's health/root endpoint so Render starts
+// booting the container. The actual stream fetch is then sent immediately after,
+// overlapping with the boot time. This typically cuts the effective wait from
+// 60 s → 25–35 s for first requests.
+async function wakePing(base) {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    await fetch(`${base}/`, { signal: controller.signal });
+    clearTimeout(timeout);
+  } catch (_) {
+    // Ignore — this is best-effort. The real fetch will wait for the timeout.
+  }
+}
+
 // ─── Fetch Streams from a Single Addon ───────────────────────────────────────
 async function fetchAddonStreams(addonKey, addonId, type, season, episode) {
   const addon = ADDONS[addonKey];
   const idPart      = type === 'tv' ? `${addonId}:${season}:${episode}` : addonId;
   const contentType = type === 'tv' ? 'series' : 'movie';
+  const addonTimeout = addon.timeout ?? 8000;
 
   async function tryBase(base) {
+    // Fire a wake ping concurrently for addons that need it (e.g. Render).
+    // We don't await it — let the actual fetch proceed in parallel.
+    if (addon.wakeBeforeFetch) wakePing(base);
+
     const url = `${base}/stream/${contentType}/${idPart}.json`;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
+    const timeout = setTimeout(() => controller.abort(), addonTimeout);
     try {
       const res = await fetch(url, { signal: controller.signal });
       clearTimeout(timeout);
@@ -210,6 +260,7 @@ async function fetchAddonStreams(addonKey, addonId, type, season, episode) {
 function requiresProxy(streamType) {
   return streamType === 'hls' && !!MEDIAFLOW_PROXY_URL;
 }
+
 async function fetchSubtitles(wyzieId, type, season, episode) {
   if (!String(wyzieId).startsWith('tt')) {
     console.warn(`⚠  Wyzie lookup using raw ID "${wyzieId}" — expect empty results without an IMDB ID`);
@@ -453,4 +504,5 @@ app.listen(PORT, () => {
   if (!TMDB_API_KEY) {
     console.warn('⚠  TMDB_API_KEY not set — ID resolution will use fallback (subtitles will likely be empty)');
   }
+  console.log(`WebStreamrMBG config: ${WEBSTREAMR_CONFIG}`);
 });
