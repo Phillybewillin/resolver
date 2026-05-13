@@ -47,13 +47,10 @@ function wrapWithProxy(streamUrl) {
 // All other addons keep the fast 8 s timeout.
 //
 
-// Builds the URL-encoded JSON config segment for WebStreamrMBG dynamically
-// so that MediaFlow credentials are forwarded to the addon at startup.
+// Builds the URL-encoded JSON config segment for WebStreamrMBG.
+// MediaFlow is intentionally excluded — streams are returned as-is.
 function buildWebStreamrConfig() {
-  const config = { multi: 'on' };
-  if (MEDIAFLOW_PROXY_URL)  config.mediaFlowProxyUrl      = MEDIAFLOW_PROXY_URL;
-  if (MEDIAFLOW_PASSWORD)   config.mediaFlowProxyPassword = MEDIAFLOW_PASSWORD;
-  return encodeURIComponent(JSON.stringify(config));
+  return encodeURIComponent(JSON.stringify({ multi: 'on' }));
 }
 
 const WEBSTREAMR_CONFIG = process.env.WEBSTREAMR_CONFIG || buildWebStreamrConfig();
@@ -61,11 +58,9 @@ const WEBSTREAMR_CONFIG = process.env.WEBSTREAMR_CONFIG || buildWebStreamrConfig
 const ADDONS = {
   webstreamrmbg: {
     base: `https://87d6a6ef6b58-webstreamrmbg.baby-beamup.club/${WEBSTREAMR_CONFIG}`,
-    // HF fallback removed — it consistently returns 404 (different/stale deployment)
     name: 'WebStreamrMBG',
-    timeout: 20000,              // addon can be slow; 8 s was causing false aborts
-    selfProxiesViaConfig: true,  // MediaFlow creds are baked into the config URL — addon proxies itself
-    requiresImdbId: true,        // only accepts tt-prefixed IDs; skip if resolution failed
+    timeout: 20000,
+    requiresImdbId: true,
   },
   nebulastreams: {
     base: 'https://nebulastreams.onrender.com',
@@ -257,10 +252,7 @@ async function fetchAddonStreams(addonKey, addonId, type, season, episode) {
       const rawUrl      = fixHostname(stripZipExtension(s.url));
       const streamType  = inferStreamType(rawUrl);
 
-      // WebStreamrMBG receives the MediaFlow credentials via its config URL,
-      // so it proxies its own streams. Wrapping them again here would double-proxy.
-      const selfProxies = addon.selfProxiesViaConfig && !!MEDIAFLOW_PROXY_URL;
-      const finalUrl = (!selfProxies && requiresProxy(streamType))
+      const finalUrl = requiresProxy(streamType)
         ? wrapWithProxy(rawUrl)
         : rawUrl;
 
