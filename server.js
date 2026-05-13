@@ -27,20 +27,16 @@ function wrapWithProxy(streamUrl) {
 
 // ─── Addon Config ────────────────────────────────────────────────────────────
 //
-// FIX 1 — WebStreamrMBG 404
-// ─────────────────────────
-// WebStreamrMBG is a configurable Stremio addon. Its stream URL requires a
-// base64url-encoded config segment between the host and /stream/:
+// FIX 1 — WebStreamrMBG 404 + correct encoding
+// ─────────────────────────────────────────────
+// WebStreamrMBG uses URL-encoded JSON as its config path segment, e.g.:
+//   https://...baby-beamup.club/%7B%22multi%22%3A%22on%22%7D/stream/...
 //
-//   {base}/{encodedConfig}/stream/{type}/{id}.json
+// The value for checkbox fields is "on" (not "true" or "checked").
 //
-// Without this segment the server returns 404. The default config enables
-// only "multi" (the manifest default). Encoded:
-//   btoa(JSON.stringify({"multi":"true"})) → eyJtdWx0aSI6InRydWUifQ==
-//
-// Override via env var WEBSTREAMR_CONFIG if you install with custom settings
-// (e.g. specific languages). Find your config string by copying the path
-// segment from your installed manifest URL.
+// Because WebStreamrMBG also accepts mediaFlowProxyUrl and mediaFlowProxyPassword
+// as config keys, we pass those in directly so the ADDON handles its own
+// proxying — no need for this server to wrap WebStreamrMBG streams at all.
 //
 // FIX 2 — NebulaStreams timeout
 // ──────────────────────────────
@@ -50,7 +46,17 @@ function wrapWithProxy(streamUrl) {
 // the actual stream fetch arrives at a warm instance.
 // All other addons keep the fast 8 s timeout.
 //
-const WEBSTREAMR_CONFIG = process.env.WEBSTREAMR_CONFIG || 'eyJtdWx0aSI6InRydWUifQ==';
+
+// Builds the URL-encoded JSON config segment for WebStreamrMBG dynamically
+// so that MediaFlow credentials are forwarded to the addon at startup.
+function buildWebStreamrConfig() {
+  const config = { multi: 'on' };
+  if (MEDIAFLOW_PROXY_URL)  config.mediaFlowProxyUrl      = MEDIAFLOW_PROXY_URL;
+  if (MEDIAFLOW_PASSWORD)   config.mediaFlowProxyPassword = MEDIAFLOW_PASSWORD;
+  return encodeURIComponent(JSON.stringify(config));
+}
+
+const WEBSTREAMR_CONFIG = process.env.WEBSTREAMR_CONFIG || buildWebStreamrConfig();
 
 const ADDONS = {
   webstreamrmbg: {
@@ -58,6 +64,7 @@ const ADDONS = {
     fallbackBase: `https://newman21-webstreamer-mbg.hf.space/${WEBSTREAMR_CONFIG}`,
     name: 'WebStreamrMBG',
     timeout: 8000,
+    selfProxiesViaConfig: true,  // MediaFlow creds are baked into the config URL — addon proxies itself
   },
   nebulastreams: {
     base: 'https://nebulastreams.onrender.com',
@@ -241,7 +248,10 @@ async function fetchAddonStreams(addonKey, addonId, type, season, episode) {
       const rawUrl      = fixHostname(stripZipExtension(s.url));
       const streamType  = inferStreamType(rawUrl);
 
-      const finalUrl = requiresProxy(streamType)
+      // WebStreamrMBG receives the MediaFlow credentials via its config URL,
+      // so it proxies its own streams. Wrapping them again here would double-proxy.
+      const selfProxies = addon.selfProxiesViaConfig && !!MEDIAFLOW_PROXY_URL;
+      const finalUrl = (!selfProxies && requiresProxy(streamType))
         ? wrapWithProxy(rawUrl)
         : rawUrl;
 
