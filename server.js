@@ -48,7 +48,7 @@ function wrapWithProxy(streamUrl) {
 //
 
 // Builds the URL-encoded JSON config segment for WebStreamrMBG.
-// MediaFlow is intentionally excluded — streams are returned as-is.
+// Only multi is passed — nothing else.
 function buildWebStreamrConfig() {
   return encodeURIComponent(JSON.stringify({ multi: 'on' }));
 }
@@ -65,13 +65,20 @@ const ADDONS = {
   nebulastreams: {
     base: 'https://nebulastreams.onrender.com',
     name: 'NebulaStreams',
-    timeout: 55000,   // Render free-tier cold start can take up to ~60 s
+    timeout: 25000,
     wakeBeforeFetch: true,
+    requiresImdbId: true,
   },
-  swordwatch: {
-    base: 'https://sword-watch.vercel.app',
-    name: 'SwordWatch',
-    timeout: 8000,
+  yukistreams: {
+    base: 'https://stremio.yukistreams.xyz/p.2jVe6a-WVvyK4J0a',
+    name: 'YukiStreams',
+    timeout: 10000,
+  },
+  murphystreams: {
+    base: 'https://badboysxs-morpheus.hf.space/bWIsbm0sZGYsaGgsa2gsa20sYXcsaG0',
+    name: 'MurphyStreams',
+    timeout: 10000,
+    requiresImdbId: true,
   },
   streamvix: { base: 'https://streamvix.hayd.uk',         name: 'StreamVix', timeout: 8000 },
   hdhub:     { base: 'https://hdhub.thevolecitor.qzz.io', name: 'HdHub',     timeout: 8000 },
@@ -202,24 +209,38 @@ async function fetchAddonStreams(addonKey, addonId, type, season, episode) {
   const contentType = type === 'tv' ? 'series' : 'movie';
   const addonTimeout = addon.timeout ?? 8000;
 
-  async function tryBase(base) {
+  async function tryBase(base, retries = 1) {
     // Fire a wake ping concurrently for addons that need it (e.g. Render).
     // We don't await it — let the actual fetch proceed in parallel.
     if (addon.wakeBeforeFetch) wakePing(base);
 
     const url = `${base}/stream/${contentType}/${idPart}.json`;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), addonTimeout);
-    try {
-      const res = await fetch(url, { signal: controller.signal });
-      clearTimeout(timeout);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      if (!data.streams || !Array.isArray(data.streams)) return [];
-      return data.streams;
-    } catch (err) {
-      clearTimeout(timeout);
-      throw err;
+
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), addonTimeout);
+      try {
+        const res = await fetch(url, { signal: controller.signal });
+        clearTimeout(timeout);
+        // 502/503 = transient gateway error — worth one retry
+        if ((res.status === 502 || res.status === 503) && attempt < retries) {
+          console.warn(`${addon.name} got ${res.status}, retrying (attempt ${attempt + 1})…`);
+          await new Promise(r => setTimeout(r, 1500));
+          continue;
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (!data.streams || !Array.isArray(data.streams)) return [];
+        return data.streams;
+      } catch (err) {
+        clearTimeout(timeout);
+        if (attempt < retries && err.name !== 'AbortError') {
+          console.warn(`${addon.name} attempt ${attempt + 1} failed (${err.message}), retrying…`);
+          await new Promise(r => setTimeout(r, 1500));
+          continue;
+        }
+        throw err;
+      }
     }
   }
 
@@ -234,11 +255,16 @@ async function fetchAddonStreams(addonKey, addonId, type, season, episode) {
         rawStreams = await tryBase(addon.fallbackBase);
       } catch (fallbackErr) {
         console.error(`${addon.name} fallback also failed:`, fallbackErr.message);
-        throw fallbackErr; // bubble up so caller gets the real message
+        throw fallbackErr;
       }
     } else {
-      throw primaryErr; // bubble up so caller gets the real message
+      throw primaryErr;
     }
+  }
+
+  // WebStreamrMBG returns /extract/ intermediate URLs — resolve them to real stream URLs.
+  if (addonKey === 'webstreamrmbg') {
+    rawStreams = await resolveWebStreamrStreams(rawStreams);
   }
 
   return rawStreams
@@ -372,14 +398,10 @@ function isBigFile(label) {
 const ADDON_ORDER = {
   webstreamrmbg: 0,
   nebulastreams:  1,
-  swordwatch:     2,
-  streamvix:      3,
-  hdhub:          4,
-  cloudnestra:   10,
-  vidsrc_xyz:    11,
-  vidsrc_to:     12,
-  vidsrc_me:     13,
-  vidsrc_pro:    14,
+  yukistreams:    2,
+  murphystreams:  3,
+  streamvix:      4,
+  hdhub:          5,
 };
 
 // ─── Sort Merged Sources ─────────────────────────────────────────────────────
@@ -442,16 +464,18 @@ app.get('/api/streams', async (req, res) => {
     const [
       webstreamrmbgR,
       nebulastreamR,
-      swordwatchR,
+      yukistreamsR,
+      murphystreamsR,
       streamvixR,
       hdhubR,
       subtitlesR,
     ] = await Promise.allSettled([
-      fetchAddonStreams('webstreamrmbg', wyzieId, type, season, episode),  // must be IMDB tt-id
-      fetchAddonStreams('nebulastreams', wyzieId, type, season, episode),
-      fetchAddonStreams('swordwatch',    addonId, type, season, episode),
-      fetchAddonStreams('streamvix',     addonId, type, season, episode),
-      fetchAddonStreams('hdhub',         addonId, type, season, episode),
+      fetchAddonStreams('webstreamrmbg',  wyzieId, type, season, episode),  // tt IMDB id
+      fetchAddonStreams('nebulastreams',  wyzieId, type, season, episode),  // tt IMDB id
+      fetchAddonStreams('yukistreams',    addonId, type, season, episode),
+      fetchAddonStreams('murphystreams',  wyzieId, type, season, episode),  // tt IMDB id
+      fetchAddonStreams('streamvix',      addonId, type, season, episode),
+      fetchAddonStreams('hdhub',          addonId, type, season, episode),
       fetchSubtitles(wyzieId, type, season, episode),
     ]);
 
@@ -461,7 +485,8 @@ app.get('/api/streams', async (req, res) => {
     const allSources = deduplicate(sortSources([
       ...streams(webstreamrmbgR),
       ...streams(nebulastreamR),
-      ...streams(swordwatchR),
+      ...streams(yukistreamsR),
+      ...streams(murphystreamsR),
       ...streams(streamvixR),
       ...streams(hdhubR),
     ]));
@@ -471,7 +496,8 @@ app.get('/api/streams', async (req, res) => {
     const addonResults = {
       WebStreamrMBG: webstreamrmbgR,
       NebulaStreams:  nebulastreamR,
-      SwordWatch:     swordwatchR,
+      YukiStreams:    yukistreamsR,
+      MurphyStreams:  murphystreamsR,
       StreamVix:      streamvixR,
       HdHub:          hdhubR,
     };
