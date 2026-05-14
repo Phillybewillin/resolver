@@ -72,12 +72,13 @@ const ADDONS = {
   yukistreams: {
     base: 'https://stremio.yukistreams.xyz/p.2jVe6a-WVvyK4J0a',
     name: 'YukiStreams',
-    timeout: 10000,
+    timeout: 15000,
   },
   murphystreams: {
     base: 'https://badboysxs-morpheus.hf.space/bWIsbm0sZGYsaGgsa2gsa20sYXcsaG0',
     name: 'MurphyStreams',
-    timeout: 10000,
+    timeout: 20000,
+    wakeBeforeFetch: true,
     requiresImdbId: true,
   },
   streamvix: { base: 'https://streamvix.hayd.uk',         name: 'StreamVix', timeout: 8000 },
@@ -260,11 +261,6 @@ async function fetchAddonStreams(addonKey, addonId, type, season, episode) {
     } else {
       throw primaryErr;
     }
-  }
-
-  // WebStreamrMBG returns /extract/ intermediate URLs — resolve them to real stream URLs.
-  if (addonKey === 'webstreamrmbg') {
-    rawStreams = await resolveWebStreamrStreams(rawStreams);
   }
 
   return rawStreams
