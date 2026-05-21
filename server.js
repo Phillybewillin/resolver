@@ -12,9 +12,6 @@ const MEDIAFLOW_PROXY_URL = (process.env.MEDIAFLOW_PROXY_URL || '').replace(/\/$
 const MEDIAFLOW_PASSWORD = process.env.MEDIAFLOW_API_PASSWORD;
 
 // ─── MediaFlow Proxy Wrapper ──────────────────────────────────────────────────
-// Correct endpoints per https://mhdzumair.github.io/mediaflow-proxy/usage/overview/
-//   HLS (.m3u8)  →  /proxy/hls/manifest.m3u8
-//   everything else →  /proxy/stream
 function wrapWithProxy(streamUrl) {
   if (!streamUrl || !MEDIAFLOW_PROXY_URL) return streamUrl;
   const isHls    = streamUrl.includes('.m3u8');
@@ -26,29 +23,6 @@ function wrapWithProxy(streamUrl) {
 }
 
 // ─── Addon Config ────────────────────────────────────────────────────────────
-//
-// FIX 1 — WebStreamrMBG 404 + correct encoding
-// ─────────────────────────────────────────────
-// WebStreamrMBG uses URL-encoded JSON as its config path segment, e.g.:
-//   https://...baby-beamup.club/%7B%22multi%22%3A%22on%22%7D/stream/...
-//
-// The value for checkbox fields is "on" (not "true" or "checked").
-//
-// Because WebStreamrMBG also accepts mediaFlowProxyUrl and mediaFlowProxyPassword
-// as config keys, we pass those in directly so the ADDON handles its own
-// proxying — no need for this server to wrap WebStreamrMBG streams at all.
-//
-// FIX 2 — NebulaStreams timeout
-// ──────────────────────────────
-// NebulaStreams runs on Render.com free tier which cold-starts in 30–60 s.
-// The old 8 s timeout aborted the request before the server even woke up.
-// Nebula now gets its own generous timeout (55 s) plus a "wake" pre-ping so
-// the actual stream fetch arrives at a warm instance.
-// All other addons keep the fast 8 s timeout.
-//
-
-// Builds the URL-encoded JSON config segment for WebStreamrMBG.
-// Only multi is passed — nothing else.
 function buildWebStreamrConfig() {
   return encodeURIComponent(JSON.stringify({ multi: 'on' }));
 }
@@ -59,7 +33,9 @@ const ADDONS = {
   webstreamrmbg: {
     base: `https://87d6a6ef6b58-webstreamrmbg.baby-beamup.club/${WEBSTREAMR_CONFIG}`,
     name: 'WebStreamrMBG',
-    timeout: 20000,
+    // FIX: bumped from 20 s → 30 s; 504s on some shows mean the upstream just
+    // needs more time. Combined with the 504 retry below this recovers most cases.
+    timeout: 30000,
     requiresImdbId: true,
   },
   nebulastreams: {
@@ -69,11 +45,7 @@ const ADDONS = {
     wakeBeforeFetch: true,
     requiresImdbId: true,
   },
-  yukistreams: {
-    base: 'https://stremio.yukistreams.xyz/p.2jVe6a-WVvyK4J0a',
-    name: 'YukiStreams',
-    timeout: 15000,
-  },
+  // YukiStreams removed — returned no results.
   murphystreams: {
     base: 'https://badboysxs-morpheus.hf.space/bWIsbm0sZGYsaGgsa2gsa20sYXcsaG0',
     name: 'MurphyStreams',
@@ -88,7 +60,6 @@ const ADDONS = {
 const WYZIE_BASE = 'https://sub.wyzie.io';
 
 // ─── Hostname Patch ──────────────────────────────────────────────────────────
-// Some addons return stream URLs with a bare hostname missing ".baby-beamup.club".
 function fixHostname(url) {
   if (!url) return url;
   try {
@@ -97,9 +68,7 @@ function fixHostname(url) {
       parsed.hostname = `${parsed.hostname}.baby-beamup.club`;
       return parsed.toString();
     }
-  } catch (_) {
-    // Malformed URL — return as-is.
-  }
+  } catch (_) {}
   return url;
 }
 
@@ -142,7 +111,6 @@ async function resolveId(tmdbId, type) {
 }
 
 // ─── Quality Parsing ─────────────────────────────────────────────────────────
-// 4K is intentionally de-prioritised (user preference).
 const QUALITY_ORDER = { '1080p': 0, '720p': 1, '480p': 2, 'auto': 3, '4k': 4 };
 
 function parseQuality(text) {
@@ -163,45 +131,32 @@ function inferStreamType(url) {
 }
 
 // ─── .zip URL Fix ─────────────────────────────────────────────────────────────
-// Some addons (e.g. HdHub) append .zip to what is actually an .mkv/.mp4 URL.
-// Strip the trailing .zip so the browser/player receives the real file extension.
 function stripZipExtension(url) {
   if (!url) return url;
   return url.replace(/\.zip(\?.*)?$/, (_, qs) => (qs || ''));
 }
 
 // ─── NoTorrent Locked Stream Filter ──────────────────────────────────────────
-// NoTorrent returns placeholder "locked" streams (🔒 in the title) that require
-// a premium account and all resolve to the same dummy URL — useless to everyone.
 function isLockedNoTorrentStream(addonKey, stream) {
   if (addonKey !== 'notorrent') return false;
   const text = `${stream.name || ''} ${stream.title || ''}`;
   return text.includes('🔒');
 }
 
-// ─── Wake Ping (Render cold-start mitigation) ────────────────────────────────
-// Fire a lightweight GET to the addon's health/root endpoint so Render starts
-// booting the container. The actual stream fetch is then sent immediately after,
-// overlapping with the boot time. This typically cuts the effective wait from
-// 60 s → 25–35 s for first requests.
+// ─── Wake Ping ───────────────────────────────────────────────────────────────
 async function wakePing(base) {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
     await fetch(`${base}/`, { signal: controller.signal });
     clearTimeout(timeout);
-  } catch (_) {
-    // Ignore — this is best-effort. The real fetch will wait for the timeout.
-  }
+  } catch (_) {}
 }
 
 // ─── Fetch Streams from a Single Addon ───────────────────────────────────────
 async function fetchAddonStreams(addonKey, addonId, type, season, episode) {
   const addon = ADDONS[addonKey];
 
-  // Guard: some addons only work with IMDB tt-prefixed IDs.
-  // If TMDB resolution failed and we only have a raw TMDB ID, skip rather than
-  // send a guaranteed-bad request and waste the timeout.
   if (addon.requiresImdbId && !String(addonId).startsWith('tt')) {
     throw new Error(`skipped — no IMDB ID (got "${addonId}")`);
   }
@@ -211,8 +166,6 @@ async function fetchAddonStreams(addonKey, addonId, type, season, episode) {
   const addonTimeout = addon.timeout ?? 8000;
 
   async function tryBase(base, retries = 1) {
-    // Fire a wake ping concurrently for addons that need it (e.g. Render).
-    // We don't await it — let the actual fetch proceed in parallel.
     if (addon.wakeBeforeFetch) wakePing(base);
 
     const url = `${base}/stream/${contentType}/${idPart}.json`;
@@ -223,10 +176,12 @@ async function fetchAddonStreams(addonKey, addonId, type, season, episode) {
       try {
         const res = await fetch(url, { signal: controller.signal });
         clearTimeout(timeout);
-        // 502/503 = transient gateway error — worth one retry
-        if ((res.status === 502 || res.status === 503) && attempt < retries) {
+        // FIX: added 504 to the transient-error retry set.
+        // WebStreamrMBG occasionally 504s on first hit for certain shows;
+        // a single retry after a short pause usually succeeds.
+        if ((res.status === 502 || res.status === 503 || res.status === 504) && attempt < retries) {
           console.warn(`${addon.name} got ${res.status}, retrying (attempt ${attempt + 1})…`);
-          await new Promise(r => setTimeout(r, 1500));
+          await new Promise(r => setTimeout(r, 2000));
           continue;
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -237,7 +192,7 @@ async function fetchAddonStreams(addonKey, addonId, type, season, episode) {
         clearTimeout(timeout);
         if (attempt < retries && err.name !== 'AbortError') {
           console.warn(`${addon.name} attempt ${attempt + 1} failed (${err.message}), retrying…`);
-          await new Promise(r => setTimeout(r, 1500));
+          await new Promise(r => setTimeout(r, 2000));
           continue;
         }
         throw err;
@@ -289,7 +244,6 @@ async function fetchAddonStreams(addonKey, addonId, type, season, episode) {
 }
 
 // ─── Domains that require proxying ───────────────────────────────────────────
-// Proxy any HLS stream — HLS is always CORS-blocked in the browser.
 function requiresProxy(streamType) {
   return streamType === 'hls' && !!MEDIAFLOW_PROXY_URL;
 }
@@ -307,8 +261,6 @@ async function fetchSubtitles(wyzieId, type, season, episode) {
   let url = `${WYZIE_BASE}/search?id=${encodeURIComponent(wyzieId)}&key=${WYZIE_API_KEY}`;
   if (type === 'tv') url += `&season=${season}&episode=${episode}`;
 
-  // 25 s — Wyzie can be slow. vercel.json sets maxDuration to 30 so this
-  // safely fits within the function lifetime even on Pro.
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 25000);
 
@@ -324,7 +276,6 @@ async function fetchSubtitles(wyzieId, type, season, episode) {
         ? raw.results
         : [];
 
-    // Keep only srt and vtt — the only formats that work on web.
     const WEB_FORMATS = new Set(['srt', 'vtt']);
     const compatible  = list.filter((sub) =>
       WEB_FORMATS.has((sub.format || '').toLowerCase())
@@ -378,7 +329,6 @@ async function fetchSubtitles(wyzieId, type, season, episode) {
   } catch (err) {
     clearTimeout(timeout);
     console.error('Wyzie fetch failed:', err.message);
-    // Surface a meaningful error string so it appears in the API response.
     throw new Error(`Wyzie: ${err.message}`);
   }
 }
@@ -394,15 +344,12 @@ function isBigFile(label) {
 const ADDON_ORDER = {
   webstreamrmbg: 0,
   nebulastreams:  1,
-  yukistreams:    2,
-  murphystreams:  3,
-  streamvix:      4,
-  hdhub:          5,
+  murphystreams:  2,
+  streamvix:      3,
+  hdhub:          4,
 };
 
 // ─── Sort Merged Sources ─────────────────────────────────────────────────────
-// Priority: non-big → quality (1080p first) → addon order
-
 function sortSources(sources) {
   return sources.sort((a, b) => {
     const aBig = isBigFile(a.label) ? 1 : 0;
@@ -418,7 +365,6 @@ function sortSources(sources) {
 }
 
 // ─── Deduplication ───────────────────────────────────────────────────────────
-// Drop sources with an identical URL that have already appeared in the list.
 function deduplicate(sources) {
   const seen = new Set();
   return sources.filter((s) => {
@@ -460,18 +406,16 @@ app.get('/api/streams', async (req, res) => {
     const [
       webstreamrmbgR,
       nebulastreamR,
-      yukistreamsR,
       murphystreamsR,
       streamvixR,
       hdhubR,
       subtitlesR,
     ] = await Promise.allSettled([
-      fetchAddonStreams('webstreamrmbg',  wyzieId, type, season, episode),  // tt IMDB id
-      fetchAddonStreams('nebulastreams',  wyzieId, type, season, episode),  // tt IMDB id
-      fetchAddonStreams('yukistreams',    addonId, type, season, episode),
-      fetchAddonStreams('murphystreams',  wyzieId, type, season, episode),  // tt IMDB id
-      fetchAddonStreams('streamvix',      addonId, type, season, episode),
-      fetchAddonStreams('hdhub',          addonId, type, season, episode),
+      fetchAddonStreams('webstreamrmbg', wyzieId, type, season, episode),
+      fetchAddonStreams('nebulastreams', wyzieId, type, season, episode),
+      fetchAddonStreams('murphystreams', wyzieId, type, season, episode),
+      fetchAddonStreams('streamvix',     addonId, type, season, episode),
+      fetchAddonStreams('hdhub',         addonId, type, season, episode),
       fetchSubtitles(wyzieId, type, season, episode),
     ]);
 
@@ -481,7 +425,6 @@ app.get('/api/streams', async (req, res) => {
     const allSources = deduplicate(sortSources([
       ...streams(webstreamrmbgR),
       ...streams(nebulastreamR),
-      ...streams(yukistreamsR),
       ...streams(murphystreamsR),
       ...streams(streamvixR),
       ...streams(hdhubR),
@@ -492,7 +435,6 @@ app.get('/api/streams', async (req, res) => {
     const addonResults = {
       WebStreamrMBG: webstreamrmbgR,
       NebulaStreams:  nebulastreamR,
-      YukiStreams:    yukistreamsR,
       MurphyStreams:  murphystreamsR,
       StreamVix:      streamvixR,
       HdHub:          hdhubR,
