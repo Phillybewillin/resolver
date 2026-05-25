@@ -39,7 +39,7 @@ const ADDONS = {
   nebulastreams: {
     base: 'https://nebulastreams.onrender.com',
     name: 'NebulaStreams',
-    timeout: 25000,
+    timeout: 30000,
     wakeBeforeFetch: true,
     requiresImdbId: true,
   },
@@ -50,11 +50,11 @@ const ADDONS = {
     wakeBeforeFetch: true,
     requiresImdbId: true,
   },
-  streamvix: { base: 'https://streamvix.hayd.uk', name: 'StreamVix', timeout: 8000 },
+  streamvix: { base: 'https://streamvix.hayd.uk', name: 'StreamVix', timeout: 18000 },
   hdhub: { 
     base: 'https://hdhub.thevolecitor.qzz.io/eyJ0b3Jib3giOiJ1bnNldCIsInF1YWxpdGllcyI6IjIxNjBwLDEwODBwLDcyMHAiLCJzb3J0IjoiZGVzYyJ9', 
     name: 'HdHub', 
-    timeout: 8000 
+    timeout: 18000 
   },
   notorrent: { 
     base: 'https://addon.notorrent2.workers.dev', 
@@ -73,9 +73,9 @@ const ADDONS = {
     timeout: 10000 
   },
   stremify: { 
-    base: 'https://stremify.hayd.uk', 
+    base: 'https://stremify.hayd.uk/YnVpbHQtaW4sZHJhbWFjb29sLGdvZ29hbmltZQ==', 
     name: 'Stremify', 
-    timeout: 10000 
+    timeout: 20000 
   }
 };
 
