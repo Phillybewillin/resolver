@@ -29,14 +29,10 @@ function buildWebStreamrConfig() {
 
 const WEBSTREAMR_CONFIG = process.env.WEBSTREAMR_CONFIG || buildWebStreamrConfig();
 
-// All entries whose manifest lives at {base}/manifest.json
-// and whose stream endpoint is {base}/stream/{type}/{id}.json
 const ADDONS = {
   webstreamrmbg: {
     base: `https://87d6a6ef6b58-webstreamrmbg.baby-beamup.club/${WEBSTREAMR_CONFIG}`,
     name: 'WebStreamrMBG',
-    // Bumped from 20 s → 30 s; 504s on some shows mean the upstream just
-    // needs more time. Combined with the 504 retry below this recovers most cases.
     timeout: 30000,
     requiresImdbId: true,
   },
@@ -47,7 +43,6 @@ const ADDONS = {
     wakeBeforeFetch: true,
     requiresImdbId: true,
   },
-  // YukiStreams removed — returned no results.
   murphystreams: {
     base: 'https://badboysxs-morpheus.hf.space/bWIsbm0sZGYsaGgsa2gsa20sYXcsaG0',
     name: 'MurphyStreams',
@@ -55,42 +50,33 @@ const ADDONS = {
     wakeBeforeFetch: true,
     requiresImdbId: true,
   },
-  notorrent: {
-    base: 'https://addon.notorrent2.workers.dev',
-    name: 'NoTorrent',
-    timeout: 15000,
-    requiresImdbId: true,
+  streamvix: { base: 'https://streamvix.hayd.uk', name: 'StreamVix', timeout: 8000 },
+  hdhub: { 
+    base: 'https://hdhub.thevolecitor.qzz.io/eyJ0b3Jib3giOiJ1bnNldCIsInF1YWxpdGllcyI6IjIxNjBwLDEwODBwLDcyMHAiLCJzb3J0IjoiZGVzYyJ9', 
+    name: 'HdHub', 
+    timeout: 8000 
   },
-  // Anime-focused addon — passes tt-prefixed IMDB IDs just like the others.
-  animestream: {
-    base: 'https://animestream-addon.keypop3750.workers.dev',
-    name: 'AnimeStream',
-    timeout: 15000,
-    requiresImdbId: true,
+  notorrent: { 
+    base: 'https://addon.notorrent2.workers.dev', 
+    name: 'NoTorrent', 
+    timeout: 10000 
   },
-  tstrm: {
-    base: 'https://tstrm.org',
-    name: 'TStrm',
-    timeout: 15000,
-    requiresImdbId: true,
+  anime: { 
+    base: 'https://animestream-addon.keypop3750.workers.dev', 
+    name: 'AnimeStream', 
+    timeout: 10000, 
+    requiresImdbId: true 
   },
-  streamify: {
-    base: 'https://stremify.hayd.uk',
-    name: 'Streamify',
-    timeout: 15000,
-    requiresImdbId: true,
+  tstrm: { 
+    base: 'https://tstrm.org', 
+    name: 'Tstrm', 
+    timeout: 10000 
   },
-  streamvix: {
-    base: 'https://streamvix.hayd.uk',
-    name: 'StreamVix',
-    timeout: 8000,
-  },
-  // Updated to the quality-configured base path (2160p / 1080p / 720p, desc sort)
-  hdhub: {
-    base: 'https://hdhub.thevolecitor.qzz.io/eyJ0b3Jib3giOiJ1bnNldCIsInF1YWxpdGllcyI6IjIxNjBwLDEwODBwLDcyMHAiLCJzb3J0IjoiZGVzYyJ9',
-    name: 'HdHub',
-    timeout: 8000,
-  },
+  stremify: { 
+    base: 'https://stremify.hayd.uk', 
+    name: 'Stremify', 
+    timeout: 10000 
+  }
 };
 
 const WYZIE_BASE = 'https://sub.wyzie.io';
@@ -185,7 +171,7 @@ async function wakePing(base) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
     await fetch(`${base}/`, { signal: controller.signal });
-    clearTimeout(timeout);
+    clearInterval(timeout);
   } catch (_) {}
 }
 
@@ -212,9 +198,6 @@ async function fetchAddonStreams(addonKey, addonId, type, season, episode) {
       try {
         const res = await fetch(url, { signal: controller.signal });
         clearTimeout(timeout);
-        // Added 504 to the transient-error retry set.
-        // WebStreamrMBG occasionally 504s on first hit for certain shows;
-        // a single retry after a short pause usually succeeds.
         if ((res.status === 502 || res.status === 503 || res.status === 504) && attempt < retries) {
           console.warn(`${addon.name} got ${res.status}, retrying (attempt ${attempt + 1})…`);
           await new Promise(r => setTimeout(r, 2000));
@@ -256,7 +239,6 @@ async function fetchAddonStreams(addonKey, addonId, type, season, episode) {
 
   return rawStreams
     .filter((s) => {
-      // Drop streams with a missing or empty URL before any further processing.
       if (!s.url || s.url.trim() === '') return false;
       if (isLockedNoTorrentStream(addonKey, s)) return false;
       return true;
@@ -264,33 +246,41 @@ async function fetchAddonStreams(addonKey, addonId, type, season, episode) {
     .flatMap((s) => {
       const qualityText = `${s.name || ''} ${s.title || ''}`;
       const rawUrl      = fixHostname(stripZipExtension(s.url));
+      const streamType  = inferStreamType(rawUrl);
 
-      // Drop if URL became empty/invalid after transforms.
-      if (!rawUrl || rawUrl.trim() === '') return [];
-
-      const streamType = inferStreamType(rawUrl);
-      const baseLabel  = `${addon.name} • ${s.title || s.name || 'Unknown'}`;
-      const quality    = parseQuality(qualityText);
-
-      const base = {
+      const baseStream = {
         type:    streamType,
-        label:   baseLabel,
-        quality,
+        quality: parseQuality(qualityText),
         addon:   addonKey,
       };
 
-      // For HLS streams when a proxy is configured, emit TWO entries:
-      //   1. Proxied  — routed through MediaFlow (better compatibility behind strict networks)
-      //   2. Direct   — raw stream URL (lower latency when the proxy isn't needed)
-      if (streamType === 'hls' && MEDIAFLOW_PROXY_URL) {
+      // Pass both proxified and non-proxified streams if proxying is active for HLS
+      if (requiresProxy(streamType)) {
         return [
-          { ...base, url: wrapWithProxy(rawUrl), label: `${baseLabel} [Proxied]` },
-          { ...base, url: rawUrl,                label: `${baseLabel} [Direct]`  },
+          {
+            ...baseStream,
+            url: wrapWithProxy(rawUrl),
+            label: `${addon.name} [Proxy] • ${s.title || s.name || 'Unknown'}`,
+          },
+          {
+            ...baseStream,
+            url: rawUrl,
+            label: `${addon.name} [Direct] • ${s.title || s.name || 'Unknown'}`,
+          }
         ];
       }
 
-      return [{ ...base, url: rawUrl }];
+      return [{
+        ...baseStream,
+        url:  rawUrl,
+        label: `${addon.name} • ${s.title || s.name || 'Unknown'}`,
+      }];
     });
+}
+
+// ─── Domains that require proxying ───────────────────────────────────────────
+function requiresProxy(streamType) {
+  return streamType === 'hls' && !!MEDIAFLOW_PROXY_URL;
 }
 
 async function fetchSubtitles(wyzieId, type, season, episode) {
@@ -390,12 +380,12 @@ const ADDON_ORDER = {
   webstreamrmbg: 0,
   nebulastreams:  1,
   murphystreams:  2,
-  notorrent:      3,
-  animestream:    4,
-  tstrm:          5,
-  streamify:      6,
-  streamvix:      7,
-  hdhub:          8,
+  streamvix:      3,
+  hdhub:          4,
+  notorrent:      5,
+  anime:          6,
+  tstrm:          7,
+  stremify:       8,
 };
 
 // ─── Sort Merged Sources ─────────────────────────────────────────────────────
@@ -409,16 +399,15 @@ function sortSources(sources) {
     const qb = QUALITY_ORDER[b.quality] ?? 3;
     if (qa !== qb) return qa - qb;
 
-    return (ADDON_ORDER[a.addon] ?? 9) - (ADDON_ORDER[b.addon] ?? 9);
+    return (ADDON_ORDER[a.addon] ?? 10) - (ADDON_ORDER[b.addon] ?? 10);
   });
 }
 
 // ─── Deduplication ───────────────────────────────────────────────────────────
-// Keyed on URL so that a Proxied and Direct entry for the same stream both survive.
 function deduplicate(sources) {
   const seen = new Set();
   return sources.filter((s) => {
-    if (!s.url || seen.has(s.url)) return false;
+    if (seen.has(s.url)) return false;
     seen.add(s.url);
     return true;
   });
@@ -429,10 +418,7 @@ app.get('/health', (_req, res) => {
   res.json({
     ok:        true,
     timestamp: Date.now(),
-    wyzieKey:  WYZIE_API_KEY
-      ? '✓ set'
-      : '✗ not set — subtitles will always be empty (get free key at https://sub.wyzie.io/redeem)',
-    addons: Object.entries(ADDONS).map(([key, a]) => ({ key, name: a.name, base: a.base })),
+    wyzieKey:  WYZIE_API_KEY ? '✓ set' : '✗ not set — subtitles will always be empty (get free key at https://sub.wyzie.io/redeem)',
   });
 });
 
@@ -456,29 +442,27 @@ app.get('/api/streams', async (req, res) => {
   try {
     const { addonId, wyzieId } = await resolveId(tmdbId, type);
 
-    // Addons that require a tt-prefixed IMDB ID use wyzieId.
-    // Addons that also accept tmdb:id use addonId (streamvix, hdhub).
     const [
       webstreamrmbgR,
       nebulastreamR,
       murphystreamsR,
-      notorrentR,
-      animestreamR,
-      tstrmR,
-      streamifyR,
       streamvixR,
       hdhubR,
+      notorrentR,
+      animeR,
+      tstrmR,
+      stremifyR,
       subtitlesR,
     ] = await Promise.allSettled([
       fetchAddonStreams('webstreamrmbg', wyzieId, type, season, episode),
-      fetchAddonStreams('nebulastreams',  wyzieId, type, season, episode),
-      fetchAddonStreams('murphystreams',  wyzieId, type, season, episode),
-      fetchAddonStreams('notorrent',      wyzieId, type, season, episode),
-      fetchAddonStreams('animestream',    wyzieId, type, season, episode),
-      fetchAddonStreams('tstrm',          wyzieId, type, season, episode),
-      fetchAddonStreams('streamify',      wyzieId, type, season, episode),
-      fetchAddonStreams('streamvix',      addonId, type, season, episode),
-      fetchAddonStreams('hdhub',          addonId, type, season, episode),
+      fetchAddonStreams('nebulastreams', wyzieId, type, season, episode),
+      fetchAddonStreams('murphystreams', wyzieId, type, season, episode),
+      fetchAddonStreams('streamvix',     addonId, type, season, episode),
+      fetchAddonStreams('hdhub',         addonId, type, season, episode),
+      fetchAddonStreams('notorrent',     addonId, type, season, episode),
+      fetchAddonStreams('anime',         addonId, type, season, episode),
+      fetchAddonStreams('tstrm',         addonId, type, season, episode),
+      fetchAddonStreams('stremify',      addonId, type, season, episode),
       fetchSubtitles(wyzieId, type, season, episode),
     ]);
 
@@ -489,12 +473,12 @@ app.get('/api/streams', async (req, res) => {
       ...streams(webstreamrmbgR),
       ...streams(nebulastreamR),
       ...streams(murphystreamsR),
-      ...streams(notorrentR),
-      ...streams(animestreamR),
-      ...streams(tstrmR),
-      ...streams(streamifyR),
       ...streams(streamvixR),
       ...streams(hdhubR),
+      ...streams(notorrentR),
+      ...streams(animeR),
+      ...streams(tstrmR),
+      ...streams(stremifyR),
     ]));
 
     const subtitles = subtitlesR.status === 'fulfilled' ? subtitlesR.value : [];
@@ -503,12 +487,12 @@ app.get('/api/streams', async (req, res) => {
       WebStreamrMBG: webstreamrmbgR,
       NebulaStreams:  nebulastreamR,
       MurphyStreams:  murphystreamsR,
-      NoTorrent:      notorrentR,
-      AnimeStream:    animestreamR,
-      TStrm:          tstrmR,
-      Streamify:      streamifyR,
       StreamVix:      streamvixR,
       HdHub:          hdhubR,
+      NoTorrent:      notorrentR,
+      AnimeStream:    animeR,
+      Tstrm:          tstrmR,
+      Stremify:       stremifyR,
     };
 
     const errors = Object.entries(addonResults)
@@ -546,17 +530,9 @@ app.get('/api/streams', async (req, res) => {
 // ─── Start ───────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`Resolver listening on http://localhost:${PORT}`);
-  console.log(`Wyzie key: ${WYZIE_API_KEY
-    ? '✓ set'
-    : '⚠  not set — subtitles will always be empty (get free key at https://sub.wyzie.io/redeem)'}`);
+  console.log(`Wyzie key: ${WYZIE_API_KEY ? '✓ set' : '⚠  not set — subtitles will always be empty (get free key at https://sub.wyzie.io/redeem)'}`);
   if (!TMDB_API_KEY) {
     console.warn('⚠  TMDB_API_KEY not set — ID resolution will use fallback (subtitles will likely be empty)');
   }
-  if (MEDIAFLOW_PROXY_URL) {
-    console.log(`MediaFlow proxy: ${MEDIAFLOW_PROXY_URL} — HLS streams will have both [Proxied] and [Direct] variants`);
-  } else {
-    console.log('MediaFlow proxy: not configured — HLS streams served direct only');
-  }
   console.log(`WebStreamrMBG config: ${WEBSTREAMR_CONFIG}`);
-  console.log(`Active addons: ${Object.values(ADDONS).map(a => a.name).join(', ')}`);
 });
