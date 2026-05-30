@@ -30,11 +30,15 @@ function buildWebStreamrConfig() {
 const WEBSTREAMR_CONFIG = process.env.WEBSTREAMR_CONFIG || buildWebStreamrConfig();
 
 const ADDONS = {
+  flixstreams: {
+    base: 'https://flixnest.app/flix-streams',
+    name: 'Flix-Streams',
+    timeout: 20000,
+    requiresImdbId: true,
+  },
   webstreamrmbg: {
     base: `https://87d6a6ef6b58-webstreamrmbg.baby-beamup.club/${WEBSTREAMR_CONFIG}`,
     name: 'WebStreamrMBG',
-    // FIX: bumped from 20 s → 30 s; 504s on some shows mean the upstream just
-    // needs more time. Combined with the 504 retry below this recovers most cases.
     timeout: 30000,
     requiresImdbId: true,
   },
@@ -49,19 +53,19 @@ const ADDONS = {
     base: 'https://stremio.yukistreams.xyz/p.2jVe6a-WVvyK4J0a',
     name: 'YukiStreams',
     timeout: 15000,
-    requiresImdbId: true,  // was passing addonId before — now uses wyzieId (tt prefix)
+    requiresImdbId: true,
   },
   cinescrape: {
     base: 'https://bc48e59c61df-cinescrape-docker.baby-beamup.club',
     name: 'Cinescrape',
     timeout: 20000,
-    requiresImdbId: true,  // idPrefixes: ["tt"]
+    requiresImdbId: true,
   },
   muvibox: {
     base: 'https://mvtmdb.netlify.app',
     name: 'Muvibox',
     timeout: 15000,
-    requiresImdbId: true,  // tt prefix performs best per user preference
+    requiresImdbId: true,
   },
   murphystreams: {
     base: 'https://badboysxs-morpheus.hf.space/bWIsbm0sZGYsaGgsa2gsa20sYXcsaG0',
@@ -70,8 +74,18 @@ const ADDONS = {
     wakeBeforeFetch: true,
     requiresImdbId: true,
   },
-  streamvix: { base: 'https://streamvix.hayd.uk',         name: 'StreamVix', timeout: 20000 },
-  hdhub:     { base: 'https://hdhub.thevolecitor.qzz.io', name: 'HdHub',     timeout: 8000 },
+  streamvix: { 
+    base: 'https://streamvix.hayd.uk',         
+    name: 'StreamVix', 
+    timeout: 20000,
+    requiresImdbId: true, 
+  },
+  hdhub: { 
+    base: 'https://hdhub.thevolecitor.qzz.io', 
+    name: 'HdHub',      
+    timeout: 8000,
+    requiresImdbId: true,
+  },
 };
 
 const WYZIE_BASE = 'https://sub.wyzie.io';
@@ -92,36 +106,78 @@ function fixHostname(url) {
 // ─── TMDB → IMDB Resolution Cache ───────────────────────────────────────────
 const idCache = new Map();
 
+async function fetchTmdbDetails(tmdbId, tmdbType) {
+  if (!TMDB_API_KEY) return null;
+  const url = `https://api.themoviedb.org/3/${tmdbType}/${tmdbId}?api_key=${TMDB_API_KEY}`;
+  try {
+    const res = await fetch(url);
+    if (res.ok) return await res.json();
+  } catch (err) {
+    console.error('TMDB details fetch failed:', err.message);
+  }
+  return null;
+}
+
 async function resolveId(tmdbId, type) {
   const cacheKey = `${type}:${tmdbId}`;
   if (idCache.has(cacheKey)) return idCache.get(cacheKey);
 
   if (!TMDB_API_KEY) {
-    console.warn('⚠  No TMDB_API_KEY — subtitles will likely be empty (Wyzie needs an IMDB ID)');
+    console.warn('⚠  No TMDB_API_KEY — subtitles and streams will use raw IDs');
     const fallback = { addonId: `tmdb:${tmdbId}`, wyzieId: tmdbId };
     idCache.set(cacheKey, fallback);
     return fallback;
   }
 
   const tmdbType = type === 'tv' ? 'tv' : 'movie';
-  const url = `https://api.themoviedb.org/3/${tmdbType}/${tmdbId}/external_ids?api_key=${TMDB_API_KEY}`;
+  let imdbId = null;
 
-  try {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`TMDB ${res.status}`);
-    const data = await res.json();
+  // 1. Fetch TMDB item metadata to check if it's Japanese Anime
+  const details = await fetchTmdbDetails(tmdbId, tmdbType);
+  if (details) {
+    const isAnimation = details.genres?.some(g => g.id === 16 || g.name?.toLowerCase() === 'animation');
+    const isJapan = details.origin_country?.includes('JP') || 
+                    details.production_countries?.some(c => c.iso_3166_1 === 'JP');
 
-    if (data.imdb_id) {
-      const result = { addonId: data.imdb_id, wyzieId: data.imdb_id };
-      idCache.set(cacheKey, result);
-      return result;
+    if (isAnimation && isJapan) {
+      console.log(`[Anime Detected] TMDB ID ${tmdbId} is Japanese Animation. Mapping ID from free sources...`);
+      try {
+        const malSyncRes = await fetch(`https://api.malsync.moe/page/TMDB/${tmdbId}`);
+        if (malSyncRes.ok) {
+          const malData = await malSyncRes.json();
+          if (malData.imdbId) {
+            imdbId = malData.imdbId;
+            console.log(`[Anime Mapped] Successfully found IMDB ID: ${imdbId}`);
+          }
+        }
+      } catch (err) {
+        console.warn('Free anime source lookup failed, using fallback external_ids:', err.message);
+      }
     }
-
-    console.warn(`⚠  TMDB returned no imdb_id for ${tmdbType}/${tmdbId}`);
-  } catch (err) {
-    console.error('TMDB resolution failed:', err.message);
   }
 
+  // 2. Fallback to normal TMDB External IDs tracking if not anime/not found via MalSync
+  if (!imdbId) {
+    const url = `https://api.themoviedb.org/3/${tmdbType}/${tmdbId}/external_ids?api_key=${TMDB_API_KEY}`;
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`TMDB external_ids returned status ${res.status}`);
+      const data = await res.json();
+      if (data.imdb_id) {
+        imdbId = data.imdb_id;
+      }
+    } catch (err) {
+      console.error('TMDB external_ids resolution failed:', err.message);
+    }
+  }
+
+  if (imdbId) {
+    const result = { addonId: imdbId, wyzieId: imdbId };
+    idCache.set(cacheKey, result);
+    return result;
+  }
+
+  console.warn(`⚠  Returned no imdb_id for ${tmdbType}/${tmdbId}`);
   const fallback = { addonId: `tmdb:${tmdbId}`, wyzieId: tmdbId };
   idCache.set(cacheKey, fallback);
   return fallback;
@@ -193,9 +249,6 @@ async function fetchAddonStreams(addonKey, addonId, type, season, episode) {
       try {
         const res = await fetch(url, { signal: controller.signal });
         clearTimeout(timeout);
-        // FIX: added 504 to the transient-error retry set.
-        // WebStreamrMBG occasionally 504s on first hit for certain shows;
-        // a single retry after a short pause usually succeeds.
         if ((res.status === 502 || res.status === 503 || res.status === 504) && attempt < retries) {
           console.warn(`${addon.name} got ${res.status}, retrying (attempt ${attempt + 1})…`);
           await new Promise(r => setTimeout(r, 2000));
@@ -238,7 +291,6 @@ async function fetchAddonStreams(addonKey, addonId, type, season, episode) {
   return rawStreams
     .filter((s) => {
       if (!s.url) return false;
-      // Drop relative URLs (e.g. /login.php?action=logout leaking from HdHub)
       if (!s.url.startsWith('http://') && !s.url.startsWith('https://')) return false;
       if (isLockedNoTorrentStream(addonKey, s)) return false;
       return true;
@@ -262,7 +314,6 @@ async function fetchAddonStreams(addonKey, addonId, type, season, episode) {
     });
 }
 
-// ─── Domains that require proxying ───────────────────────────────────────────
 function requiresProxy(streamType) {
   return streamType === 'hls' && !!MEDIAFLOW_PROXY_URL;
 }
@@ -361,14 +412,15 @@ function isBigFile(label) {
 
 // ─── Addon Sort Weight ───────────────────────────────────────────────────────
 const ADDON_ORDER = {
-  webstreamrmbg: 0,
-  nebulastreams:  1,
-  yukistreams:    2,
-  cinescrape:     3,
-  muvibox:        4,
-  murphystreams:  5,
-  streamvix:      6,
-  hdhub:          7,
+  flixstreams:   0,
+  webstreamrmbg: 1,
+  nebulastreams: 2,
+  yukistreams:   3,
+  cinescrape:    4,
+  muvibox:       5,
+  murphystreams: 6,
+  streamvix:     7,
+  hdhub:         8,
 };
 
 // ─── Sort Merged Sources ─────────────────────────────────────────────────────
@@ -401,7 +453,7 @@ app.get('/health', (_req, res) => {
   res.json({
     ok:        true,
     timestamp: Date.now(),
-    wyzieKey:  WYZIE_API_KEY ? '✓ set' : '✗ not set — subtitles will always be empty (get free key at https://sub.wyzie.io/redeem)',
+    wyzieKey:  WYZIE_API_KEY ? '✓ set' : '✗ not set',
   });
 });
 
@@ -426,6 +478,7 @@ app.get('/api/streams', async (req, res) => {
     const { addonId, wyzieId } = await resolveId(tmdbId, type);
 
     const [
+      flixstreamsR,
       webstreamrmbgR,
       nebulastreamR,
       yukistreamsR,
@@ -436,14 +489,15 @@ app.get('/api/streams', async (req, res) => {
       hdhubR,
       subtitlesR,
     ] = await Promise.allSettled([
+      fetchAddonStreams('flixstreams',   wyzieId, type, season, episode),
       fetchAddonStreams('webstreamrmbg', wyzieId, type, season, episode),
       fetchAddonStreams('nebulastreams', wyzieId, type, season, episode),
-      fetchAddonStreams('yukistreams',   wyzieId, type, season, episode),  // tt prefix fix
+      fetchAddonStreams('yukistreams',   wyzieId, type, season, episode),
       fetchAddonStreams('cinescrape',    wyzieId, type, season, episode),
       fetchAddonStreams('muvibox',       wyzieId, type, season, episode),
       fetchAddonStreams('murphystreams', wyzieId, type, season, episode),
-      fetchAddonStreams('streamvix',     addonId, type, season, episode),
-      fetchAddonStreams('hdhub',         addonId, type, season, episode),
+      fetchAddonStreams('streamvix',     wyzieId, type, season, episode),
+      fetchAddonStreams('hdhub',         wyzieId, type, season, episode),
       fetchSubtitles(wyzieId, type, season, episode),
     ]);
 
@@ -451,6 +505,7 @@ app.get('/api/streams', async (req, res) => {
       r.status === 'fulfilled' && Array.isArray(r.value) ? r.value : [];
 
     const allSources = deduplicate(sortSources([
+      ...streams(flixstreamsR),
       ...streams(webstreamrmbgR),
       ...streams(nebulastreamR),
       ...streams(yukistreamsR),
@@ -464,14 +519,15 @@ app.get('/api/streams', async (req, res) => {
     const subtitles = subtitlesR.status === 'fulfilled' ? subtitlesR.value : [];
 
     const addonResults = {
+      FlixStreams:   flixstreamsR,
       WebStreamrMBG: webstreamrmbgR,
-      NebulaStreams:  nebulastreamR,
-      YukiStreams:    yukistreamsR,
-      Cinescrape:     cinescrapeR,
-      Muvibox:        muviboxR,
-      MurphyStreams:  murphystreamsR,
-      StreamVix:      streamvixR,
-      HdHub:          hdhubR,
+      NebulaStreams: nebulastreamR,
+      YukiStreams:   yukistreamsR,
+      Cinescrape:    cinescrapeR,
+      Muvibox:       muviboxR,
+      MurphyStreams: murphystreamsR,
+      StreamVix:     streamvixR,
+      HdHub:         hdhubR,
     };
 
     const errors = Object.entries(addonResults)
@@ -492,7 +548,7 @@ app.get('/api/streams', async (req, res) => {
     }
 
     res.json({
-      resolvedId: addonId,
+      resolvedId: wyzieId,
       sources:    allSources,
       subtitles,
       error: errors.length > 0 ? errors.join('; ') : null,
@@ -509,9 +565,8 @@ app.get('/api/streams', async (req, res) => {
 // ─── Start ───────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`Resolver listening on http://localhost:${PORT}`);
-  console.log(`Wyzie key: ${WYZIE_API_KEY ? '✓ set' : '⚠  not set — subtitles will always be empty (get free key at https://sub.wyzie.io/redeem)'}`);
+  console.log(`Wyzie key: ${WYZIE_API_KEY ? '✓ set' : '⚠  not set'}`);
   if (!TMDB_API_KEY) {
-    console.warn('⚠  TMDB_API_KEY not set — ID resolution will use fallback (subtitles will likely be empty)');
+    console.warn('⚠  TMDB_API_KEY not set — ID resolution fallback active');
   }
-  console.log(`WebStreamrMBG config: ${WEBSTREAMR_CONFIG}`);
 });
