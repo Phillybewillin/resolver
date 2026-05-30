@@ -45,7 +45,24 @@ const ADDONS = {
     wakeBeforeFetch: true,
     requiresImdbId: true,
   },
-  // YukiStreams removed — returned no results.
+  yukistreams: {
+    base: 'https://stremio.yukistreams.xyz/p.2jVe6a-WVvyK4J0a',
+    name: 'YukiStreams',
+    timeout: 15000,
+    requiresImdbId: true,  // was passing addonId before — now uses wyzieId (tt prefix)
+  },
+  cinescrape: {
+    base: 'https://bc48e59c61df-cinescrape-docker.baby-beamup.club',
+    name: 'Cinescrape',
+    timeout: 20000,
+    requiresImdbId: true,  // idPrefixes: ["tt"]
+  },
+  muvibox: {
+    base: 'https://mvtmdb.netlify.app',
+    name: 'Muvibox',
+    timeout: 15000,
+    requiresImdbId: true,  // tt prefix performs best per user preference
+  },
   murphystreams: {
     base: 'https://badboysxs-morpheus.hf.space/bWIsbm0sZGYsaGgsa2gsa20sYXcsaG0',
     name: 'MurphyStreams',
@@ -53,7 +70,7 @@ const ADDONS = {
     wakeBeforeFetch: true,
     requiresImdbId: true,
   },
-  streamvix: { base: 'https://streamvix.hayd.uk',         name: 'StreamVix', timeout: 8000 },
+  streamvix: { base: 'https://streamvix.hayd.uk',         name: 'StreamVix', timeout: 20000 },
   hdhub:     { base: 'https://hdhub.thevolecitor.qzz.io', name: 'HdHub',     timeout: 8000 },
 };
 
@@ -165,7 +182,7 @@ async function fetchAddonStreams(addonKey, addonId, type, season, episode) {
   const contentType = type === 'tv' ? 'series' : 'movie';
   const addonTimeout = addon.timeout ?? 8000;
 
-  async function tryBase(base, retries = 1) {
+  async function tryBase(base, retries = 2) {
     if (addon.wakeBeforeFetch) wakePing(base);
 
     const url = `${base}/stream/${contentType}/${idPart}.json`;
@@ -221,6 +238,8 @@ async function fetchAddonStreams(addonKey, addonId, type, season, episode) {
   return rawStreams
     .filter((s) => {
       if (!s.url) return false;
+      // Drop relative URLs (e.g. /login.php?action=logout leaking from HdHub)
+      if (!s.url.startsWith('http://') && !s.url.startsWith('https://')) return false;
       if (isLockedNoTorrentStream(addonKey, s)) return false;
       return true;
     })
@@ -344,9 +363,12 @@ function isBigFile(label) {
 const ADDON_ORDER = {
   webstreamrmbg: 0,
   nebulastreams:  1,
-  murphystreams:  2,
-  streamvix:      3,
-  hdhub:          4,
+  yukistreams:    2,
+  cinescrape:     3,
+  muvibox:        4,
+  murphystreams:  5,
+  streamvix:      6,
+  hdhub:          7,
 };
 
 // ─── Sort Merged Sources ─────────────────────────────────────────────────────
@@ -406,6 +428,9 @@ app.get('/api/streams', async (req, res) => {
     const [
       webstreamrmbgR,
       nebulastreamR,
+      yukistreamsR,
+      cinescrapeR,
+      muviboxR,
       murphystreamsR,
       streamvixR,
       hdhubR,
@@ -413,6 +438,9 @@ app.get('/api/streams', async (req, res) => {
     ] = await Promise.allSettled([
       fetchAddonStreams('webstreamrmbg', wyzieId, type, season, episode),
       fetchAddonStreams('nebulastreams', wyzieId, type, season, episode),
+      fetchAddonStreams('yukistreams',   wyzieId, type, season, episode),  // tt prefix fix
+      fetchAddonStreams('cinescrape',    wyzieId, type, season, episode),
+      fetchAddonStreams('muvibox',       wyzieId, type, season, episode),
       fetchAddonStreams('murphystreams', wyzieId, type, season, episode),
       fetchAddonStreams('streamvix',     addonId, type, season, episode),
       fetchAddonStreams('hdhub',         addonId, type, season, episode),
@@ -425,6 +453,9 @@ app.get('/api/streams', async (req, res) => {
     const allSources = deduplicate(sortSources([
       ...streams(webstreamrmbgR),
       ...streams(nebulastreamR),
+      ...streams(yukistreamsR),
+      ...streams(cinescrapeR),
+      ...streams(muviboxR),
       ...streams(murphystreamsR),
       ...streams(streamvixR),
       ...streams(hdhubR),
@@ -435,6 +466,9 @@ app.get('/api/streams', async (req, res) => {
     const addonResults = {
       WebStreamrMBG: webstreamrmbgR,
       NebulaStreams:  nebulastreamR,
+      YukiStreams:    yukistreamsR,
+      Cinescrape:     cinescrapeR,
+      Muvibox:        muviboxR,
       MurphyStreams:  murphystreamsR,
       StreamVix:      streamvixR,
       HdHub:          hdhubR,
