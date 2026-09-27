@@ -43,6 +43,20 @@ const WEBSTREAMR_CONFIG = process.env.WEBSTREAMR_CONFIG || buildWebStreamrConfig
 // All addons use requiresImdbId: true — everything gets the tt-prefixed IMDB ID.
 // Addons with supportsAnimeId: true also accept kitsu:{id} for detected anime.
 const ADDONS = {
+ 
+  pengu: {
+    base: 'https://pengu.uk/%7B%22auth_token%22%3A%22HPlQJiXq5kVlkfrX5yZUKmrt0G0ojVIxMVYV053gzVA%22%7D',
+    name: 'Pengu',
+    timeout: 30000,
+    requiresImdbId: true,
+  }, 
+  
+  hdhub: {
+    base: 'https://hdhub.thevolecitor.qzz.io',
+    name: 'HdHub',
+    timeout: 10000,
+    requiresImdbId: true,  // standardised to tt prefix
+  },
   webstreamrmbg: {
     base: `https://87d6a6ef6b58-webstreamrmbg.baby-beamup.club/${WEBSTREAMR_CONFIG}`,
     name: 'WebStreamrMBG',
@@ -60,12 +74,6 @@ const ADDONS = {
     base: 'https://stremio.yukistreams.xyz/p.2jVe6a-WVvyK4J0a',
     name: 'YukiStreams',
     timeout: 15000,
-    requiresImdbId: true,
-  },
-  cinescrape: {
-    base: 'https://bc48e59c61df-cinescrape-docker.baby-beamup.club',
-    name: 'Cinescrape',
-    timeout: 30000,
     requiresImdbId: true,
   },
   muvibox: {
@@ -92,12 +100,6 @@ const ADDONS = {
     base: 'https://streamvix.hayd.uk',
     name: 'StreamVix',
     timeout: 20000,
-    requiresImdbId: true,  // standardised to tt prefix
-  },
-  hdhub: {
-    base: 'https://hdhub.thevolecitor.qzz.io',
-    name: 'HdHub',
-    timeout: 10000,
     requiresImdbId: true,  // standardised to tt prefix
   },
 };
@@ -491,7 +493,7 @@ const ADDON_ORDER = {
   webstreamrmbg: 0,
   nebulastreams:  1,
   yukistreams:    2,
-  cinescrape:     3,
+  pengu:          3,
   muvibox:        4,
   flixstreams:    5,
   murphystreams:  6,
@@ -559,7 +561,7 @@ app.get('/api/streams', async (req, res) => {
       webstreamrmbgR,
       nebulastreamR,
       yukistreamsR,
-      cinescrapeR,
+      penguR,
       muviboxR,
       flixstreamsR,
       murphystreamsR,
@@ -570,8 +572,8 @@ app.get('/api/streams', async (req, res) => {
       fetchAddonStreams('webstreamrmbg', ids, type, season, episode),
       fetchAddonStreams('nebulastreams',  ids, type, season, episode),
       fetchAddonStreams('yukistreams',    ids, type, season, episode),
-      fetchAddonStreams('cinescrape',     ids, type, season, episode),
-      fetchAddonStreams('muvibox',        ids, type, season, episode),
+      fetchAddonStreams('pengu',          ids, type, season, episode),
+      fetchAddonStreams('muuvibox',        ids, type, season, episode),
       fetchAddonStreams('flixstreams',    ids, type, season, episode),
       fetchAddonStreams('murphystreams',  ids, type, season, episode),
       fetchAddonStreams('streamvix',      ids, type, season, episode),
@@ -585,7 +587,7 @@ app.get('/api/streams', async (req, res) => {
       ...streams(webstreamrmbgR),
       ...streams(nebulastreamR),
       ...streams(yukistreamsR),
-      ...streams(cinescrapeR),
+      ...streams(penguR),
       ...streams(muviboxR),
       ...streams(flixstreamsR),
       ...streams(murphystreamsR),
@@ -599,7 +601,7 @@ app.get('/api/streams', async (req, res) => {
       WebStreamrMBG: webstreamrmbgR,
       NebulaStreams:  nebulastreamR,
       YukiStreams:    yukistreamsR,
-      Cinescrape:     cinescrapeR,
+      Pengu:          penguR,
       Muvibox:        muviboxR,
       FlixStreams:    flixstreamsR,
       MurphyStreams:  murphystreamsR,
