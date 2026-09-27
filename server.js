@@ -573,7 +573,7 @@ app.get('/api/streams', async (req, res) => {
       fetchAddonStreams('nebulastreams',  ids, type, season, episode),
       fetchAddonStreams('yukistreams',    ids, type, season, episode),
       fetchAddonStreams('pengu',          ids, type, season, episode),
-      fetchAddonStreams('muuvibox',        ids, type, season, episode),
+      fetchAddonStreams('muvibox',        ids, type, season, episode),
       fetchAddonStreams('flixstreams',    ids, type, season, episode),
       fetchAddonStreams('murphystreams',  ids, type, season, episode),
       fetchAddonStreams('streamvix',      ids, type, season, episode),
