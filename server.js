@@ -251,9 +251,20 @@ async function fetchAddonStreams(addonKey, ids, type, season, episode) {
 }
 
 // ─── Subtitles ────────────────────────────────────────────────────────────────
+// ─── Subtitles (Wyzie Direct API) ─────────────────────────────────────────────
 async function fetchSubtitles(wyzieId, type, season, episode) {
-  let url = `${WYZIE_BASE}/search?id=${encodeURIComponent(wyzieId)}&key=${WYZIE_API_KEY}`;
-  if (type === 'tv') url += `&season=${season}&episode=${episode}`;
+  if (!WYZIE_API_KEY) {
+    console.warn('⚠  WYZIE_API_KEY not set — subtitles will be empty');
+    return [];
+  }
+
+  // Ensure wyzieId is clean (strip any accidental prefixes like "tmdb:")
+  const cleanId = String(wyzieId).replace(/^(tmdb|kitsu):/, '');
+
+  let url = `${WYZIE_BASE}/search?id=${encodeURIComponent(cleanId)}&format=srt,vtt,ass&key=${WYZIE_API_KEY}`;
+  if (type === 'tv' && season && episode) {
+    url += `&season=${season}&episode=${episode}`;
+  }
 
   const controller = new AbortController();
   const to = setTimeout(() => controller.abort(), 25000);
@@ -261,25 +272,47 @@ async function fetchSubtitles(wyzieId, type, season, episode) {
   try {
     const res = await fetch(url, { signal: controller.signal });
     clearTimeout(to);
-    if (!res.ok) throw new Error(`Wyzie HTTP ${res.status}: ${res.statusText}`);
+    
+    // Check for specific API error codes from documentation
+    if (res.status === 402) {
+      console.error('Wyzie Error 402: Pro balance exhausted.');
+      return [];
+    }
+    if (res.status === 429) {
+      console.error('Wyzie Error 429: Free key daily cap of 1,000 requests exceeded.');
+      return [];
+    }
+    if (res.status === 403) {
+      console.error('Wyzie Error 403: Invalid API key or key on hold.');
+      return [];
+    }
+    if (!res.ok) {
+      throw new Error(`Wyzie HTTP ${res.status}: ${res.statusText}`);
+    }
 
     const raw  = await res.json();
     const list = Array.isArray(raw) ? raw : Array.isArray(raw?.results) ? raw.results : [];
 
-    const WEB_FORMATS = new Set(['srt', 'vtt']);
-    const compatible  = list.filter(sub => WEB_FORMATS.has((sub.format || '').toLowerCase()));
-
-    if (compatible.length === 0) return [];
+    if (list.length === 0) return [];
 
     const seenNonEn  = new Set();
     const seenEnKeys = new Set();
     const unique     = [];
 
-    for (const sub of compatible) {
+    for (const sub of list) {
       const lang = (sub.language || sub.lang || '').toLowerCase();
       if (!lang) continue;
+      
       const isHI    = !!(sub.isHearingImpaired || sub.isHI);
       const display = sub.display || sub.language || sub.lang || '';
+      
+      // Ensure download URL automatically converts non-VTT formats to browser-safe VTT if requested, 
+      // or preserve original URL as provided by Wyzie /c/... with encrypted tok parameter.
+      let subUrl = sub.url;
+      if (subUrl && !subUrl.includes('to=vtt') && (sub.format === 'ass' || sub.format === 'srt')) {
+        subUrl += (subUrl.includes('?') ? '&' : '?') + 'to=vtt';
+      }
+
       if (lang.startsWith('en')) {
         const key = `${lang}|${isHI}|${display.toLowerCase()}`;
         if (seenEnKeys.has(key)) continue;
@@ -288,7 +321,14 @@ async function fetchSubtitles(wyzieId, type, season, episode) {
         if (seenNonEn.has(lang)) continue;
         seenNonEn.add(lang);
       }
-      unique.push({ url: sub.url, lang: sub.language || sub.lang || '', display, format: sub.format || 'srt', isHI });
+
+      unique.push({ 
+        url: subUrl, 
+        lang: sub.language || sub.lang || '', 
+        display, 
+        format: 'vtt', // normalized for player compatibility
+        isHI 
+      });
     }
 
     unique.sort((a, b) => {
@@ -303,9 +343,10 @@ async function fetchSubtitles(wyzieId, type, season, episode) {
   } catch (err) {
     clearTimeout(to);
     console.error('Wyzie fetch failed:', err.message);
-    throw new Error(`Wyzie: ${err.message}`);
+    return [];
   }
 }
+
 
 // ─── Big File Detection & Sorting ────────────────────────────────────────────
 function isBigFile(label) {
